@@ -1,4 +1,7 @@
 ﻿<#
+  Nebula Client. Copyright (C) 2026 Arseniy07955. Лицензия GNU GPL v3.0, https://www.gnu.org/licenses/gpl-3.0.html
+  Поставляется «КАК ЕСТЬ» (AS IS), без каких-либо гарантий.
+
 .SYNOPSIS
   Nebula Client: подключает Windows-ПК к сети Nebula по инвайту из панели Nebula Control.
 
