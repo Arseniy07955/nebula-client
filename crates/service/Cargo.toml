@@ -1,0 +1,21 @@
+[package]
+name = "nebula-client-service"
+description = "Служба Nebula Client: вход в сеть, синхронизация и запуск Nebula"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nebula-client-service"
+path = "src/main.rs"
+
+[dependencies]
+common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+windows-sys.workspace = true
+windows-service = "0.8"
+ureq = { version = "2", default-features = false, features = ["json", "native-tls"] }
+native-tls = "0.2"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
