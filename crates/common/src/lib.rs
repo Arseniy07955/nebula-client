@@ -27,7 +27,7 @@ pub fn pipe_name() -> String {
 /// Адрес панели по умолчанию. Для своей сборки задайте NEBULA_CLIENT_SERVER при компиляции.
 pub const DEFAULT_SERVER: &str = match option_env!("NEBULA_CLIENT_SERVER") {
     Some(s) => s,
-    None => "https://cabinet.senkapopka.ru/nebula",
+    None => "https://svyaz.msk1.catpaws.ru",
 };
 
 /// Папка данных службы: Nebula, а в networks/<код сети> ключ, сертификат, конфиг и токен каждой сети.
