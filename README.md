@@ -72,3 +72,8 @@ $nc = "$env:ProgramData\NebulaClient\nebula-join.ps1"
 
 Версия и SHA256 зашиты в начале скрипта (`$NebulaVersion`, `$NebulaBuilds`). Суммы берутся из `SHASUM256.txt`
 релиза. Менять версию стоит осознанно, вместе с lighthouse и релеями сети.
+
+## Лицензия
+
+[MIT](LICENSE). Nebula скачивается с официальных релизов [slackhq/nebula](https://github.com/slackhq/nebula) (MIT),
+драйвер Wintun идёт в её архиве под своей лицензией.
