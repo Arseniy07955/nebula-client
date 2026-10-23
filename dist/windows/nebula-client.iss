@@ -67,15 +67,22 @@ Type: files; Name: "{app}\uninstall.cmd"
 
 [Icons]
 Name: "{autoprograms}\Nebula Client"; Filename: "{app}\nebula-client.exe"
-Name: "{autodesktop}\Nebula Client"; Filename: "{app}\nebula-client.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Nebula Client"; Filename: "{app}\nebula-client.exe"; Tasks: desktopicon; Check: not UpdateMode
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nebula Client"; ValueData: """{app}\nebula-client.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nebula Client"; ValueData: """{app}\nebula-client.exe"""; Flags: uninsdeletevalue; Tasks: autostart; Check: not UpdateMode
 
 [Run]
-Filename: "{app}\nebula-client.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall runasoriginaluser
+Filename: "{app}\nebula-client.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall runasoriginaluser skipifsilent
 
 [Code]
+{ /UPDATE=1: тихое обновление от службы (она работает от SYSTEM). Её HKCU и рабочий стол
+  не трогаем, значок в трей служба вернёт сама. }
+function UpdateMode: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
+
 procedure Run(const Exe, Params: String; var Code: Integer);
 begin
   if not Exec(Exe, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) then

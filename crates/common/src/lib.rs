@@ -77,6 +77,37 @@ pub enum Request {
     Sync { net: Option<String> },
     /// Выйти из сети: остановить её Nebula и стереть ключ, сертификат и токен.
     Leave { net: String },
+    /// Проверить обновления сейчас.
+    UpdateCheck,
+    UpdateSet { mode: UpdateMode, prerelease: bool },
+    /// Поставить найденное обновление (Windows).
+    UpdateInstall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMode {
+    /// Скачать и поставить самому (в Linux только сообщить).
+    #[default]
+    Auto,
+    Notify,
+    Off,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateState {
+    pub mode: UpdateMode,
+    /// Получать и тестовые версии (pre-release).
+    pub prerelease: bool,
+    /// Найденная версия новее текущей.
+    pub available: Option<String>,
+    /// Страница релиза.
+    pub page: Option<String>,
+    /// Служба может поставить её сама (Windows, у релиза есть установщик и SHA256SUMS).
+    pub can_install: bool,
+    pub installing: bool,
+    pub last_check: Option<i64>,
+    pub error: Option<String>,
 }
 
 /// Запрос вместе с языком окна, чтобы служба отвечала на нём же.
@@ -125,6 +156,8 @@ pub struct Status {
     pub busy: Option<String>,
     pub service_version: String,
     pub os: String,
+    #[serde(default)]
+    pub update: UpdateState,
 }
 
 impl Status {
@@ -141,6 +174,9 @@ pub struct Peer {
     pub role: String,
     #[serde(default)]
     pub online: bool,
+    /// Пинг с этого устройства по туннелю Nebula, мс. Только у тех, кто в сети.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

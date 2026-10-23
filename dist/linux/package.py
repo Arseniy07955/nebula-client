@@ -45,6 +45,16 @@ def main():
                 info.size, info.mode, info.mtime = len(data), mode, int(os.path.getmtime(src.format(bin=bin_dir)))
                 tar.addfile(info, io.BytesIO(data))
         print(path)
+    write_sums(out_dir)
+
+
+def write_sums(out_dir):
+    """SHA256SUMS.txt по всем файлам релиза (тот же формат пишет dist/windows/build.ps1)."""
+    import hashlib
+    names = sorted(n for n in os.listdir(out_dir) if n != "SHA256SUMS.txt" and os.path.isfile(os.path.join(out_dir, n)))
+    lines = [f"{hashlib.sha256(open(os.path.join(out_dir, n), 'rb').read()).hexdigest()}  {n}" for n in names]
+    with open(os.path.join(out_dir, "SHA256SUMS.txt"), "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

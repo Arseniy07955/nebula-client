@@ -36,4 +36,10 @@ if ($got -ne $sum) { throw "SHA256 $zip не совпал: $got" }
 
 & $Iscc "/DVersion=$version" "$here\nebula-client.iss"
 if ($LASTEXITCODE) { throw "ISCC failed" }
-Get-Item "$root\dist\out\nebula-client-$version-setup.exe"
+
+# SHA256SUMS.txt по всем файлам релиза: по нему служба проверяет скачанное обновление
+$out = "$root\dist\out"
+$lines = Get-ChildItem $out -File | Where-Object Name -ne "SHA256SUMS.txt" | Sort-Object Name |
+    ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+[IO.File]::WriteAllText("$out\SHA256SUMS.txt", ($lines -join "`n") + "`n")
+Get-Item "$out\nebula-client-$version-setup.exe", "$out\SHA256SUMS.txt"

@@ -229,3 +229,129 @@ pub fn migrate_script_install(dir: &Path) -> bool {
 }
 
 pub const OS: &str = "windows";
+
+// ------------------------------------------------------------------ обновление
+
+/// Запустить скачанный установщик тихо. Он остановит службу, заменит файлы и запустит её снова;
+/// значок в трее он закрывает, поэтому оставляем метку, чтобы новая служба вернула его.
+pub fn run_installer(setup: &Path, dir: &Path) -> Result<(), String> {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let upd = dir.join("updates");
+    let marker = upd.join("relaunch-tray");
+    std::fs::write(&marker, b"1").map_err(|e| e.to_string())?;
+    let r = Command::new(setup)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/UPDATE=1"])
+        .arg(format!("/LOG={}", upd.join("setup.log").display()))
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn();
+    match r {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&marker);
+            Err(format!("{}: {e}", setup.display()))
+        }
+    }
+}
+
+/// Запустить nebula-client.exe в сессии пользователя, который сидит за компьютером.
+/// Служба работает от SYSTEM, поэтому берём токен этой сессии.
+pub fn relaunch_tray(logs: &Arc<crate::logs::Logs>) {
+    use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW};
+
+    let Some(app) = std::env::current_exe().ok().map(|e| e.with_file_name("nebula-client.exe")).filter(|p| p.exists()) else { return };
+    let logs = logs.clone();
+    std::thread::spawn(move || {
+        // установщик ещё дописывает файлы и ярлыки
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        unsafe {
+            let sid = WTSGetActiveConsoleSessionId();
+            let mut tok: HANDLE = std::ptr::null_mut();
+            if sid == u32::MAX || WTSQueryUserToken(sid, &mut tok) == 0 {
+                // никто не вошёл: значок поднимется сам при входе (автозапуск)
+                return;
+            }
+            let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
+            let has_env = CreateEnvironmentBlock(&mut env, tok, 0) != 0;
+            let mut desktop = wide(r"winsta0\default");
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            si.lpDesktop = desktop.as_mut_ptr();
+            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+            let mut cmd = wide(&format!("\"{}\"", app.display()));
+            let cwd = wide(&app.parent().map(|p| p.display().to_string()).unwrap_or_default());
+            let ok = CreateProcessAsUserW(
+                tok,
+                std::ptr::null(),
+                cmd.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                CREATE_UNICODE_ENVIRONMENT,
+                if has_env { env } else { std::ptr::null_mut() },
+                cwd.as_ptr(),
+                &si,
+                &mut pi,
+            );
+            if ok != 0 {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            } else {
+                logs.note(format!("tray: CreateProcessAsUser {}", GetLastError()));
+            }
+            if has_env {
+                DestroyEnvironmentBlock(env);
+            }
+            CloseHandle(tok);
+        }
+    });
+}
+
+// ------------------------------------------------------------------ пинг
+
+/// Один ICMP echo через IcmpSendEcho: прав администратора не нужно, консоль не мигает.
+pub fn ping(ip: std::net::Ipv4Addr, timeout: std::time::Duration) -> Option<f32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY};
+    let data = *b"nebula-client-ping";
+    let mut reply = vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + data.len() + 8];
+    unsafe {
+        let h = IcmpCreateFile();
+        if h == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let n = IcmpSendEcho(
+            h,
+            u32::from_ne_bytes(ip.octets()),
+            data.as_ptr() as _,
+            data.len() as u16,
+            std::ptr::null(),
+            reply.as_mut_ptr() as _,
+            reply.len() as u32,
+            timeout.as_millis() as u32,
+        );
+        IcmpCloseHandle(h);
+        if n == 0 {
+            return None;
+        }
+        let r = std::ptr::read_unaligned(reply.as_ptr() as *const ICMP_ECHO_REPLY);
+        // Status 0 = IP_SUCCESS; время у Windows целыми миллисекундами
+        (r.Status == 0).then_some(r.RoundTripTime as f32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ping_loopback() {
+        assert!(super::ping("127.0.0.1".parse().unwrap(), std::time::Duration::from_secs(1)).is_some());
+    }
+
+    /// NEBULA_PING_TEST=10.77.0.1 cargo test ping_target -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ping_target() {
+        let ip = std::env::var("NEBULA_PING_TEST").unwrap();
+        println!("{ip}: {:?}", super::ping(ip.parse().unwrap(), std::time::Duration::from_millis(1500)));
+    }
+}

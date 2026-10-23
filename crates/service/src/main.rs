@@ -5,8 +5,9 @@ mod core;
 mod logs;
 mod nebula;
 mod plat;
+mod update;
 
-use common::{tr, trf, Request};
+use common::{tr, trf, Request, UpdateMode};
 
 const HELP_RU: &str = "nebula-client-service КОМАНДА
 
@@ -22,7 +23,10 @@ const HELP_RU: &str = "nebula-client-service КОМАНДА
   connect СЕТЬ | disconnect СЕТЬ
   sync [СЕТЬ]                 продлить сертификат и обновить конфиг сейчас
   leave СЕТЬ                  выйти из сети и стереть её ключ
-  logs                        журнал службы и nebula";
+  logs                        журнал службы и nebula
+  update [check|install]      проверить обновления / поставить найденное (Windows)
+  update auto|notify|off [--pre yes|no]
+                              ставить самому, только сообщать или не проверять; --pre: тестовые версии";
 
 const HELP_EN: &str = "nebula-client-service COMMAND
 
@@ -38,7 +42,10 @@ const HELP_EN: &str = "nebula-client-service COMMAND
   connect NET | disconnect NET
   sync [NET]                  renew the certificate and refresh the config now
   leave NET                   leave the network and delete its key
-  logs                        service and nebula log";
+  logs                        service and nebula log
+  update [check|install]      check for updates / install the one found (Windows)
+  update auto|notify|off [--pre yes|no]
+                              install automatically, only notify or never check; --pre: test versions";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -153,6 +160,22 @@ fn client(cmd: &str, args: &[String]) -> i32 {
         "disconnect" => net().map(|net| Request::Disconnect { net }),
         "leave" => net().map(|net| Request::Leave { net }),
         "sync" => Ok(Request::Sync { net: positional(args) }),
+        "update" => match positional(args).as_deref() {
+            None | Some("check") => Ok(Request::UpdateCheck),
+            Some("install") => Ok(Request::UpdateInstall),
+            Some(m @ ("auto" | "notify" | "off")) => {
+                let mode = match m {
+                    "auto" => UpdateMode::Auto,
+                    "notify" => UpdateMode::Notify,
+                    _ => UpdateMode::Off,
+                };
+                // без --pre оставляем как было
+                let cur = common::call(&Request::Status).ok().and_then(|r| r.status).map(|s| s.update.prerelease).unwrap_or(true);
+                let pre = flag(args, "--pre").map(|v| matches!(v.as_str(), "yes" | "on" | "1" | "true")).unwrap_or(cur);
+                Ok(Request::UpdateSet { mode, prerelease: pre })
+            }
+            Some(_) => Err(()),
+        },
         _ => {
             eprintln!("{}", tr(HELP_RU, HELP_EN));
             return 2;
@@ -173,6 +196,20 @@ fn client(cmd: &str, args: &[String]) -> i32 {
                 }),
                 "logs" => r.logs.unwrap_or_default().iter().for_each(|l| println!("{l}")),
                 "open" => r.open.unwrap_or_default().iter().for_each(|o| println!("{:<16} {}", o.slug, o.title)),
+                "update" => {
+                    let st = r.status.unwrap_or_default();
+                    let u = st.update;
+                    println!("{} {}, {:?}{}", tr("версия", "version"), st.service_version, u.mode, if u.prerelease { tr(", с тестовыми", ", with test versions") } else { "" });
+                    match (&u.available, u.installing) {
+                        (Some(v), true) => println!("{}", trf!("ставлю {}", "installing {}", v)),
+                        (Some(v), false) => println!("{}  {}", trf!("доступна {}", "{} is available", v), u.page.unwrap_or_default()),
+                        (None, _) if u.error.is_none() => println!("{}", tr("обновлений нет", "up to date")),
+                        _ => {}
+                    }
+                    if let Some(e) = u.error {
+                        println!("{}: {e}", tr("ошибка", "error"));
+                    }
+                }
                 _ => {
                     let st = r.status.unwrap_or_default();
                     if st.networks.is_empty() {

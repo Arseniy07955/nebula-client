@@ -130,3 +130,68 @@ pub fn migrate_script_install(_dir: &Path) -> bool {
 }
 
 pub const OS: &str = "linux";
+
+// ------------------------------------------------------------------ обновление
+
+/// В Linux обновляют install.sh, пакетный менеджер или Nix, служба только сообщает о версии.
+pub fn run_installer(_setup: &Path, _dir: &Path) -> Result<(), String> {
+    Err(common::tr("в Linux обновление ставится вручную", "on Linux the update is installed manually").into())
+}
+
+pub fn relaunch_tray(_logs: &Arc<crate::logs::Logs>) {}
+
+// ------------------------------------------------------------------ пинг
+
+fn icmp_checksum(b: &[u8]) -> u16 {
+    let mut sum: u32 = b.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32).sum();
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Один ICMP echo через «ping-сокет» (SOCK_DGRAM + IPPROTO_ICMP): служба работает от root,
+/// ей он доступен всегда, внешний ping не нужен.
+pub fn ping(ip: std::net::Ipv4Addr, timeout: Duration) -> Option<f32> {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP);
+        if fd < 0 {
+            return None;
+        }
+        let r = ping_fd(fd, ip, timeout);
+        libc::close(fd);
+        r
+    }
+}
+
+unsafe fn ping_fd(fd: libc::c_int, ip: std::net::Ipv4Addr, timeout: Duration) -> Option<f32> {
+    let tv = libc::timeval { tv_sec: timeout.as_secs() as _, tv_usec: timeout.subsec_micros() as _ };
+    libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const libc::c_void, std::mem::size_of::<libc::timeval>() as u32);
+    let mut addr: libc::sockaddr_in = std::mem::zeroed();
+    addr.sin_family = libc::AF_INET as _;
+    addr.sin_addr.s_addr = u32::from_ne_bytes(ip.octets());
+    let seq = (std::process::id() as u16) ^ (Instant::now().elapsed().subsec_nanos() as u16) ^ ip.octets()[3] as u16;
+    let mut pkt = [0u8; 24];
+    pkt[0] = 8; // echo request; идентификатор подставит ядро
+    pkt[6..8].copy_from_slice(&seq.to_be_bytes());
+    pkt[8..].copy_from_slice(b"nebula-client-pi");
+    let cs = icmp_checksum(&pkt);
+    pkt[2..4].copy_from_slice(&cs.to_be_bytes());
+    let start = Instant::now();
+    let sent = libc::sendto(fd, pkt.as_ptr() as *const libc::c_void, pkt.len(), 0, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32);
+    if sent < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    while start.elapsed() < timeout {
+        let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+        if n < 0 {
+            return None;
+        }
+        // ответ ping-сокета приходит без IP-заголовка: тип 0 = echo reply
+        if n >= 8 && buf[0] == 0 && buf[6..8] == seq.to_be_bytes() {
+            return Some(start.elapsed().as_secs_f32() * 1000.0);
+        }
+    }
+    None
+}

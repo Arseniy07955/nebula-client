@@ -11,7 +11,8 @@ use crate::api::{self, NetInfo, Payload};
 use crate::logs::Logs;
 use crate::nebula::{self, Running};
 use crate::plat;
-use common::{now, tr, trf, ConnState, NetStatus, OpenNet, Peer, Request, Response, Status, CLIENT_VERSION};
+use crate::update::{self, Upd};
+use common::{now, tr, trf, ConnState, NetStatus, OpenNet, Peer, Request, Response, Status, UpdateMode, CLIENT_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -105,6 +106,8 @@ pub struct Core {
     pub logs: Arc<Logs>,
     sync_all: AtomicBool,
     stopping: AtomicBool,
+    upd: Mutex<Upd>,
+    update_now: AtomicBool,
 }
 
 const NET_FILES: &[&str] = &["device.json", "settings.json", "host.key", "host.pub", "host.crt", "ca.crt", "config.yml", "ssh_host_ed25519_key"];
@@ -164,7 +167,10 @@ fn unique_tun(config: &str, slug: &str, taken: &[String]) -> String {
 impl Core {
     pub fn new(dir: PathBuf) -> Arc<Core> {
         let logs = Arc::new(Logs::default());
+        let upd = Mutex::new(Upd { saved: update::Saved::load(&dir), ..Default::default() });
         let core = Arc::new(Core {
+            upd,
+            update_now: AtomicBool::new(false),
             dir,
             inner: Mutex::new(Inner::default()),
             op: Mutex::new(()),
@@ -272,6 +278,7 @@ impl Core {
             busy: i.busy.clone(),
             service_version: env!("CARGO_PKG_VERSION").into(),
             os: plat::OS.into(),
+            update: self.upd.lock().unwrap().state(),
         }
     }
 
@@ -297,6 +304,19 @@ impl Core {
                 }
             },
             Request::Leave { net } => self.leave(&net).map(|_| Response::ok()),
+            Request::UpdateCheck => self.update_check().map(|_| Response::ok()),
+            Request::UpdateSet { mode, prerelease } => {
+                let mut u = self.upd.lock().unwrap();
+                let wake = u.saved.mode == UpdateMode::Off && mode != UpdateMode::Off || u.saved.prerelease != prerelease;
+                u.saved.mode = mode;
+                u.saved.prerelease = prerelease;
+                u.saved.save(&self.dir);
+                if wake {
+                    self.update_now.store(true, Ordering::SeqCst);
+                }
+                Ok(Response::ok())
+            }
+            Request::UpdateInstall => self.update_install().map(|_| Response::ok()),
         };
         let mut resp = r.unwrap_or_else(Response::err);
         resp.status = Some(self.status());
@@ -457,15 +477,25 @@ impl Core {
     }
 
     fn peers(&self, slug: &str) -> Result<Vec<Peer>, String> {
-        let (dev, fresh, cached) = {
+        let (dev, fresh, cached, running) = {
             let i = self.inner.lock().unwrap();
             let n = i.nets.get(slug).ok_or_else(|| Self::no_net(slug))?;
-            (n.dev.clone(), now() - n.peers_ts < PEERS_TTL, n.peers.clone())
+            (n.dev.clone(), now() - n.peers_ts < PEERS_TTL, n.peers.clone(), n.state == ConnState::Running)
         };
         if fresh {
             return Ok(cached);
         }
-        let fetched = api::get(&dev.server, "/v1/peers", Some(&dev.token)).ok().map(|v| serde_json::from_value::<Vec<Peer>>(v["peers"].clone()).unwrap_or_default());
+        let mut fetched = api::get(&dev.server, "/v1/peers", Some(&dev.token)).ok().map(|v| serde_json::from_value::<Vec<Peer>>(v["peers"].clone()).unwrap_or_default());
+        // пинг по туннелю до тех, кто в сети; список спрашивает только открытое окно, так что в фоне это не крутится
+        if let (Some(list), true) = (fetched.as_mut(), running) {
+            std::thread::scope(|s| {
+                for p in list.iter_mut().filter(|p| p.online && p.ip != dev.ip) {
+                    s.spawn(move || {
+                        p.rtt = p.ip.parse().ok().and_then(|ip| plat::ping(ip, Duration::from_millis(1500)));
+                    });
+                }
+            });
+        }
         let mut i = self.inner.lock().unwrap();
         let Some(n) = i.nets.get_mut(slug) else { return Ok(cached) };
         n.peers_ts = now();
@@ -631,6 +661,110 @@ impl Core {
         std::thread::spawn(move || a.supervise());
         let b = self.clone();
         std::thread::spawn(move || b.sync_loop());
+        self.after_update();
+        let c = self.clone();
+        std::thread::spawn(move || c.update_loop());
+    }
+
+    // ------------------------------------------------------------- обновления
+
+    fn update_check(&self) -> Result<(), String> {
+        let pre = self.upd.lock().unwrap().saved.prerelease;
+        let r = update::check(pre);
+        let mut u = self.upd.lock().unwrap();
+        u.saved.last_check = Some(now());
+        u.saved.save(&self.dir);
+        match r {
+            Ok(rel) => {
+                if let Some(v) = rel.as_ref().map(|r| r.version.clone()) {
+                    if u.available.as_ref().map(|a| a.version != v).unwrap_or(true) {
+                        self.logs.note(trf!("доступна версия {}", "version {} is available", v));
+                    }
+                }
+                u.available = rel;
+                u.error = None;
+                Ok(())
+            }
+            Err(e) => {
+                u.error = Some(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    fn update_install(self: &Arc<Self>) -> Result<(), String> {
+        let rel = {
+            let mut u = self.upd.lock().unwrap();
+            let rel = u.available.clone().ok_or(tr("обновлений нет, сначала проверьте", "no update found, check first"))?;
+            if !rel.can_install() {
+                return Err(tr("эту версию нужно поставить вручную со страницы релиза", "install this version manually from the release page").into());
+            }
+            if u.installing {
+                return Ok(());
+            }
+            u.installing = true;
+            rel
+        };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            me.logs.note(trf!("скачиваю обновление {}", "downloading update {}", rel.version));
+            let r = update::fetch(&rel, &me.dir).and_then(|path| plat::run_installer(&path, &me.dir));
+            match r {
+                Ok(()) => me.logs.note(trf!("ставлю версию {}, служба перезапустится", "installing version {}, the service will restart", rel.version)),
+                Err(e) => {
+                    me.logs.note(trf!("обновление не удалось: {}", "update failed: {}", e));
+                    let mut u = me.upd.lock().unwrap();
+                    u.installing = false;
+                    u.fail = Some((rel.version.clone(), e));
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Служба запустилась после тихого обновления: вернуть значок в трей, убрать установщик.
+    fn after_update(&self) {
+        let dir = self.dir.join("updates");
+        if !dir.exists() {
+            return;
+        }
+        if std::fs::remove_file(dir.join("relaunch-tray")).is_ok() {
+            self.logs.note(trf!("обновлено до {}", "updated to {}", env!("CARGO_PKG_VERSION")));
+            plat::relaunch_tray(&self.logs);
+        }
+        // установщик ещё может работать (он и запустил службу), тогда уберём в следующий раз
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn update_loop(self: Arc<Self>) {
+        // не мешаем старту сетей
+        for _ in 0..90 {
+            if self.stopping.load(Ordering::SeqCst) || self.update_now.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        while !self.stopping.load(Ordering::SeqCst) {
+            let forced = self.update_now.swap(false, Ordering::SeqCst);
+            let (due, mode) = {
+                let u = self.upd.lock().unwrap();
+                (update::due(&u.saved), u.saved.mode)
+            };
+            if (due || forced) && mode != UpdateMode::Off && self.update_check().is_ok() && mode == UpdateMode::Auto {
+                let u = self.upd.lock().unwrap();
+                let go = !u.installing && u.available.as_ref().map(|r| r.can_install()).unwrap_or(false);
+                drop(u);
+                if go {
+                    let _ = self.update_install();
+                }
+            }
+            for _ in 0..60 {
+                if self.stopping.load(Ordering::SeqCst) || self.update_now.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
     }
 
     pub fn dir(&self) -> &Path {

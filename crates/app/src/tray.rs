@@ -66,7 +66,16 @@ struct Items {
     quit: MenuItem,
     /// (id пункта, slug сети)
     nets: Vec<(MenuId, String, CheckMenuItem)>,
-    slugs: Vec<String>,
+    /// «Обновить до X», если служба нашла новую версию.
+    update: Option<MenuItem>,
+    /// По этому ключу видно, что меню пора собрать заново.
+    key: String,
+}
+
+fn menu_key(st: &Option<Status>) -> String {
+    let Some(s) = st else { return String::new() };
+    let nets: Vec<&str> = s.networks.iter().map(|n| n.slug.as_str()).collect();
+    format!("{}|{:?}|{}", nets.join(","), s.update.available, s.update.installing)
 }
 
 fn build(st: &Option<Status>) -> Items {
@@ -76,6 +85,13 @@ fn build(st: &Option<Status>) -> Items {
     let quit = MenuItem::new(tr("Выход", "Quit"), true, None);
     let menu = Menu::new();
     let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &open]);
+    let upd = st.as_ref().map(|s| s.update.clone()).unwrap_or_default();
+    let update = upd.available.as_ref().filter(|_| !upd.installing).map(|v| {
+        let text = if upd.can_install { trf!("Обновить до {}", "Update to {}", v) } else { trf!("Доступна версия {}", "Version {} is available", v) };
+        let item = MenuItem::new(text, true, None);
+        let _ = menu.append(&item);
+        item
+    });
     let mut nets = Vec::new();
     let networks = st.as_ref().map(|s| s.networks.clone()).unwrap_or_default();
     if !networks.is_empty() {
@@ -87,8 +103,7 @@ fn build(st: &Option<Status>) -> Items {
         nets.push((item.id().clone(), n.slug.clone(), item));
     }
     let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &auto, &quit]);
-    let slugs = networks.iter().map(|n| n.slug.clone()).collect();
-    Items { menu, status, open, auto, quit, nets, slugs }
+    Items { menu, status, open, auto, quit, nets, update, key: menu_key(st) }
 }
 
 pub fn run() {
@@ -113,7 +128,7 @@ pub fn run() {
         .expect("tray icon");
 
     let (tx, rx) = mpsc::channel::<Result<Status, ()>>();
-    let mut last: Option<Status>;
+    let mut last: Option<Status> = None;
     let mut next_poll = Instant::now();
     let mut polling = false;
 
@@ -141,9 +156,8 @@ pub fn run() {
             next_poll = Instant::now() + Duration::from_secs(3);
             let svc_err = r.is_err();
             last = r.ok();
-            let slugs: Vec<String> = last.as_ref().map(|s| s.networks.iter().map(|n| n.slug.clone()).collect()).unwrap_or_default();
-            if slugs != items.slugs {
-                // набор сетей поменялся: меню собирается заново
+            if menu_key(&last) != items.key {
+                // поменялся набор сетей или появилось обновление: меню собирается заново
                 items = build(&last);
                 tray.set_menu(Some(Box::new(items.menu.clone())));
             }
@@ -176,6 +190,16 @@ pub fn run() {
                 sys::open_window();
             } else if ev.id == items.auto.id() {
                 sys::set_autostart(items.auto.is_checked());
+            } else if items.update.as_ref().map(|u| u.id() == &ev.id).unwrap_or(false) {
+                let upd = last.as_ref().map(|s| s.update.clone()).unwrap_or_default();
+                if upd.can_install {
+                    std::thread::spawn(|| {
+                        let _ = common::call(&Request::UpdateInstall);
+                    });
+                    next_poll = Instant::now() + Duration::from_millis(500);
+                } else {
+                    sys::open_window();
+                }
             } else if ev.id == items.quit.id() {
                 // служба продолжает работать, закрывается только значок
                 return;

@@ -69,6 +69,27 @@ Nebula берётся из nixpkgs (`services.nebula-client.nebulaPackage`), д�
 Язык окна, трея и сообщений панели берётся из системы (русский или английский). Задать вручную:
 `NEBULA_CLIENT_LANG=en` или `ru`.
 
+### Пинг
+
+У участников, которые сейчас в сети, рядом с адресом видна задержка с этого устройства по туннелю Nebula:
+зелёная до 60 мс, жёлтая до 150, дальше красная. Служба пингует только пока открыто окно и только тех, кто онлайн
+(Windows: `IcmpSendEcho`, Linux: ICMP-сокет без внешнего `ping`).
+
+### Обновления
+
+Раз в сутки служба смотрит [релизы](https://github.com/Arseniy07955/nebula-client/releases). Настраивается в окне
+(«Настройки») или командой `update`:
+
+- **Ставить самому** (по умолчанию, Windows): служба скачивает `setup.exe`, сверяет его с `SHA256SUMS.txt` того же
+  релиза и ставит тихо. Связь пропадает на несколько секунд, значок в трее возвращается сам.
+- **Только сообщать**: в окне и в трее появится «Доступна версия X» с кнопкой «Установить».
+- **Не проверять.**
+- «Получать тестовые версии»: учитывать pre-release (включено, пока все релизы тестовые).
+
+В Linux служба только сообщает о новой версии: обновление ставится тем же `install.sh` или через Nix.
+Установщики не подписаны, поэтому защита держится на SHA256 и на том, что релизы выкладываются только из этого
+репозитория.
+
 ### Как устроено
 
 | Часть | Что делает | Память |
@@ -93,6 +114,8 @@ nebula-client-service open [--server URL]       какие сети пускаю
 nebula-client-service join --name ИМЯ [--invite КОД] [--net СЕТЬ] [--server URL]
 nebula-client-service connect|disconnect|peers|leave СЕТЬ
 nebula-client-service sync [СЕТЬ] | logs
+nebula-client-service update [check|install]    проверить / поставить найденное обновление
+nebula-client-service update auto|notify|off [--pre yes|no]
 nebula-client-service install | uninstall [--purge]   (Windows)
 nebula-client-service run                       в консоли или под systemd
 ```
@@ -214,5 +237,10 @@ a virtual LAN with your friends. One device can be in several networks at once, 
 The UI follows the system language (Russian or English); override it with `NEBULA_CLIENT_LANG=en`. The service CLI
 (`nebula-client-service status | open | join | connect | disconnect | peers | sync | leave | logs`) prints help when
 run without arguments. Leaving a network deletes its key and revokes the certificate on the panel.
+
+The member list shows the ping from this device to online peers over the Nebula tunnel. Once a day the service
+checks GitHub releases; on Windows it downloads `setup.exe`, verifies it against the release's `SHA256SUMS.txt`
+and installs it silently (Settings → Updates, or `nebula-client-service update auto|notify|off`). On Linux it only
+notifies.
 
 Licensed under GPL-3.0 and provided AS IS, without any warranty (sections 15 and 16 of the license).

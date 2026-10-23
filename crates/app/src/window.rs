@@ -2,7 +2,7 @@
 //! Данные спрашиваются у службы в фоновом потоке и только пока окно открыто.
 
 use crate::icons::{self, Look};
-use common::{tr, trf, ConnState, NetStatus, OpenNet, Peer, Request, Status};
+use common::{tr, trf, ConnState, NetStatus, OpenNet, Peer, Request, Status, UpdateMode};
 use eframe::egui::{self, Color32, RichText, Sense};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +42,8 @@ struct App {
     /// Какая сеть открыта (None: экран «Добавить сеть»).
     sel: Arc<Mutex<Option<String>>>,
     adding: bool,
+    /// Экран настроек (обновления, автозапуск).
+    settings: bool,
     tab: Tab,
     server: String,
     name: String,
@@ -91,6 +93,7 @@ impl App {
             poke,
             sel,
             adding: false,
+            settings: false,
             tab: Tab::Peers,
             server: common::DEFAULT_SERVER.into(),
             name: common::default_device_name(),
@@ -258,12 +261,19 @@ impl eframe::App for App {
                 }
                 self.net_bar(ui, &st, sel.as_deref());
                 ui.add_space(4.0);
+                if !self.settings {
+                    self.update_banner(ui, &st);
+                }
+                if self.settings {
+                    self.settings_view(ui, ctx, &st, acting);
+                } else {
                 match sel.as_deref().and_then(|s| st.net(s)).filter(|_| !self.adding) {
                     Some(n) => {
                         let p = peers.get(&n.slug).cloned().unwrap_or_default();
                         self.network(ui, ctx, n, &p, &logs, acting);
                     }
                     None => self.join_form(ui, ctx, &st, acting),
+                }
                 }
             } else {
                 ui.spinner();
@@ -309,12 +319,9 @@ fn no_service(ui: &mut egui::Ui, err: &str, poke: &AtomicBool) {
 impl App {
     /// Строка переключения сетей и кнопка «добавить».
     fn net_bar(&mut self, ui: &mut egui::Ui, st: &Status, sel: Option<&str>) {
-        if st.networks.is_empty() {
-            return;
-        }
         ui.horizontal_wrapped(|ui| {
             for n in &st.networks {
-                let on = sel == Some(n.slug.as_str()) && !self.adding;
+                let on = sel == Some(n.slug.as_str()) && !self.adding && !self.settings;
                 let resp = ui
                     .scope(|ui| {
                         ui.horizontal(|ui| {
@@ -327,15 +334,113 @@ impl App {
                 if resp.clicked() {
                     *self.sel.lock().unwrap() = Some(n.slug.clone());
                     self.adding = false;
+                    self.settings = false;
                     self.confirm_leave = None;
                     self.poke.store(true, Ordering::SeqCst);
                 }
             }
-            if ui.selectable_label(self.adding, tr("+ Добавить сеть", "+ Add network")).clicked() {
+            if !st.networks.is_empty() && ui.selectable_label(self.adding && !self.settings, tr("+ Добавить сеть", "+ Add network")).clicked() {
                 self.adding = true;
+                self.settings = false;
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let dot_new = st.update.available.is_some() && !self.settings;
+                let text = if dot_new { format!("{} •", tr("Настройки", "Settings")) } else { tr("Настройки", "Settings").to_string() };
+                if ui.selectable_label(self.settings, text).clicked() {
+                    self.settings = !self.settings;
+                }
+            });
         });
         ui.separator();
+    }
+
+    /// Плашка о новой версии на главном экране.
+    fn update_banner(&mut self, ui: &mut egui::Ui, st: &Status) {
+        let u = &st.update;
+        let Some(v) = &u.available else { return };
+        let text = if u.installing {
+            trf!("Ставлю обновление {}…", "Installing update {}…", v)
+        } else {
+            trf!("Доступна версия {}", "Version {} is available", v)
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(text).color(ACCENT));
+            if !u.installing && ui.small_button(tr("Подробнее", "Details")).clicked() {
+                self.settings = true;
+            }
+        });
+    }
+
+    fn settings_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, st: &Status, acting: bool) {
+        let u = st.update.clone();
+        ui.heading(tr("Настройки", "Settings"));
+        ui.label(RichText::new(trf!("Nebula Client {} ({})", "Nebula Client {} ({})", st.service_version, st.os)).color(MUTED));
+        ui.add_space(8.0);
+
+        egui::Frame::group(ui.style()).rounding(8.0).inner_margin(12.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(tr("Обновления", "Updates")).strong());
+            let mut mode = u.mode;
+            let auto_text = if cfg!(windows) {
+                tr("Скачивать и ставить самому", "Download and install automatically")
+            } else {
+                tr("Проверять раз в сутки и сообщать", "Check daily and notify")
+            };
+            ui.radio_value(&mut mode, UpdateMode::Auto, auto_text);
+            if cfg!(windows) {
+                ui.radio_value(&mut mode, UpdateMode::Notify, tr("Только сообщать о новой версии", "Only notify about a new version"));
+            }
+            ui.radio_value(&mut mode, UpdateMode::Off, tr("Не проверять", "Never check"));
+            let mut pre = u.prerelease;
+            ui.checkbox(&mut pre, tr("Получать тестовые версии", "Get test versions"));
+            if (mode != u.mode || pre != u.prerelease) && !acting {
+                self.act(ctx, Request::UpdateSet { mode, prerelease: pre }, "");
+            }
+            ui.add_space(4.0);
+            match (&u.available, u.installing) {
+                (Some(v), true) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(trf!("Ставлю {}, служба перезапустится сама", "Installing {}, the service will restart by itself", v));
+                    });
+                }
+                (Some(v), false) => {
+                    ui.label(RichText::new(trf!("Доступна версия {}", "Version {} is available", v)).color(ACCENT));
+                    ui.horizontal(|ui| {
+                        if u.can_install && ui.add_enabled(!acting, egui::Button::new(trf!("Установить {}", "Install {}", v))).clicked() {
+                            self.act(ctx, Request::UpdateInstall, tr("Скачиваю обновление", "Downloading the update"));
+                        }
+                        if let Some(page) = &u.page {
+                            if ui.button(tr("Что нового", "What's new")).clicked() {
+                                open_url(page);
+                            }
+                        }
+                    });
+                    if !u.can_install && cfg!(not(windows)) {
+                        ui.label(RichText::new(tr("Скачайте архив со страницы релиза и запустите install.sh, на NixOS обновите flake", "Download the archive from the release page and run install.sh; on NixOS update the flake")).small().color(MUTED));
+                    }
+                }
+                (None, _) => {
+                    let when = u.last_check.map(ago).unwrap_or_else(|| tr("ещё не было", "not yet").into());
+                    ui.label(RichText::new(trf!("Последняя версия. Проверка: {}", "Up to date. Last check: {}", when)).color(MUTED));
+                }
+            }
+            if let Some(e) = &u.error {
+                ui.label(RichText::new(trf!("Проверка не удалась: {}", "Check failed: {}", e)).color(DANGER));
+            }
+            if ui.add_enabled(!acting && u.mode != UpdateMode::Off, egui::Button::new(tr("Проверить сейчас", "Check now"))).clicked() {
+                self.act(ctx, Request::UpdateCheck, "");
+            }
+        });
+
+        #[cfg(windows)]
+        {
+            ui.add_space(8.0);
+            let mut auto = crate::sys::autostart_enabled();
+            if ui.checkbox(&mut auto, tr("Значок в трее при входе в Windows", "Tray icon at Windows sign-in")).changed() {
+                crate::sys::set_autostart(auto);
+            }
+        }
     }
 
     fn join_form(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, st: &Status, acting: bool) {
@@ -483,7 +588,19 @@ impl App {
                             } else if p.role == "lighthouse" {
                                 ui.label(RichText::new(tr("маяк", "lighthouse")).small().color(MUTED));
                             }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_label(ui, &p.ip));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                copy_label(ui, &p.ip);
+                                if let Some(ms) = p.rtt {
+                                    let color = match ms {
+                                        m if m < 60.0 => ACCENT,
+                                        m if m < 150.0 => Color32::from_rgb(0xe5, 0xa5, 0x0a),
+                                        _ => DANGER,
+                                    };
+                                    let text = if ms < 1.0 { tr("<1 мс", "<1 ms").to_string() } else { trf!("{} мс", "{} ms", ms.round() as u32) };
+                                    ui.label(RichText::new(text).small().color(color))
+                                        .on_hover_text(tr("Пинг с этого устройства по туннелю Nebula", "Ping from this device over the Nebula tunnel"));
+                                }
+                            });
                         });
                     }
                 });
@@ -528,4 +645,16 @@ impl App {
             });
         });
     }
+}
+
+/// Открыть ссылку в браузере без окна консоли.
+fn open_url(url: &str) {
+    if !url.starts_with("https://") {
+        return;
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = r;
 }
