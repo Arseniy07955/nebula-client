@@ -9,7 +9,7 @@
   Приватный ключ не покидает этот ПК.
 
 .EXAMPLE
-  Подключиться (PowerShell от имени администратора):
+  Подключиться (PowerShell от имени администратора). Если в сети свободная регистрация, -Invite не нужен:
   & ([scriptblock]::Create((irm 'https://example.org/nebula/v1/join.ps1'))) -Invite NF-XXXX-XXXX-XXXX
 
 .EXAMPLE
@@ -240,7 +240,6 @@ function Invoke-Enroll {
     if (Test-Path $StateFile) {
         throw "Этот ПК уже подключён. Чтобы подключиться заново, сначала выполните: & `"$SelfPath`" -Uninstall"
     }
-    if (-not $Invite) { $script:Invite = Read-Host 'Код инвайта (NF-XXXX-XXXX-XXXX)' }
     $def = Default-Name
     if (-not $Name) {
         $script:Name = Read-Host "Имя устройства латиницей [$def]"
@@ -261,10 +260,17 @@ function Invoke-Enroll {
     while ($true) {
         Say "Подключаюсь к $Server как $Name"
         try {
-            $r = Invoke-Api POST '/v1/enroll' @{ invite = $Invite; name = $Name; public_key = [IO.File]::ReadAllText($pub); conf_dir = $confDir; client = $ClientVersion }
+            $r = Invoke-Api POST '/v1/enroll' @{ invite = "$Invite"; name = $Name; public_key = [IO.File]::ReadAllText($pub); conf_dir = $confDir; client = $ClientVersion }
             break
         }
         catch {
+            # без кода пускает только сеть со свободной регистрацией, иначе спрашиваем инвайт
+            if ($_.Exception.Data['Code'] -eq 403 -and -not $Invite -and [Environment]::UserInteractive) {
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                $script:Invite = Read-Host 'Код инвайта (NF-XXXX-XXXX-XXXX)'
+                if (-not $Invite) { throw 'Подключение отменено' }
+                continue
+            }
             if ($_.Exception.Data['Code'] -eq 409 -and [Environment]::UserInteractive) {
                 Write-Host $_.Exception.Message -ForegroundColor Yellow
                 $script:Name = Read-Host 'Другое имя устройства'
