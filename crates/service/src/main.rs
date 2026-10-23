@@ -23,6 +23,7 @@ const HELP_RU: &str = "nebula-client-service КОМАНДА
   connect СЕТЬ | disconnect СЕТЬ
   sync [СЕТЬ]                 продлить сертификат и обновить конфиг сейчас
   leave СЕТЬ                  выйти из сети и стереть её ключ
+  dns СЕТЬ on|off             спрашивать имена сети (например, *.neb) у её DNS, пока сеть подключена
   logs                        журнал службы и nebula
   update [check|install]      проверить обновления / поставить найденное (Windows)
   update auto|notify|off [--pre yes|no]
@@ -42,6 +43,7 @@ const HELP_EN: &str = "nebula-client-service COMMAND
   connect NET | disconnect NET
   sync [NET]                  renew the certificate and refresh the config now
   leave NET                   leave the network and delete its key
+  dns NET on|off              resolve the network's names (e.g. *.neb) with its DNS while connected
   logs                        service and nebula log
   update [check|install]      check for updates / install the one found (Windows)
   update auto|notify|off [--pre yes|no]
@@ -160,6 +162,14 @@ fn client(cmd: &str, args: &[String]) -> i32 {
         "disconnect" => net().map(|net| Request::Disconnect { net }),
         "leave" => net().map(|net| Request::Leave { net }),
         "sync" => Ok(Request::Sync { net: positional(args) }),
+        "dns" => match (positional(args), args.get(1).map(String::as_str)) {
+            (Some(net), Some("on")) => Ok(Request::SetDns { net, on: true }),
+            (Some(net), Some("off")) => Ok(Request::SetDns { net, on: false }),
+            _ => {
+                eprintln!("dns {} on|off", tr("СЕТЬ", "NET"));
+                return 2;
+            }
+        },
         "update" => match positional(args).as_deref() {
             None | Some("check") => Ok(Request::UpdateCheck),
             Some("install") => Ok(Request::UpdateInstall),
@@ -225,6 +235,10 @@ fn client(cmd: &str, args: &[String]) -> i32 {
                             if n.want_up { "" } else { tr(" (выключена)", " (disabled)") },
                             n.error.as_ref().map(|e| format!("  {e}")).unwrap_or_default()
                         );
+                        if let Some(d) = &n.dns {
+                            let zones = d.domains.iter().map(|z| format!("*.{z}")).collect::<Vec<_>>().join(", ");
+                            println!("{:<12} DNS {} -> {}{}", "", zones, d.server, if n.dns_on { "" } else { tr(" (выключен)", " (off)") });
+                        }
                     }
                     if let Some(b) = st.busy {
                         println!("… {b}");
@@ -350,6 +364,7 @@ mod winsvc {
             svc.delete().map_err(|e| e.to_string())?;
         }
         plat::remove_firewall();
+        let _ = plat::set_dns(&[]);
         if purge {
             // ключи сейчас сотрутся: пусть панели сразу отзовут сертификаты этого устройства
             let nets = common::data_dir().join("networks");

@@ -77,6 +77,8 @@ pub enum Request {
     Sync { net: Option<String> },
     /// Выйти из сети: остановить её Nebula и стереть ключ, сертификат и токен.
     Leave { net: String },
+    /// Отправлять ли запросы к зонам сети на её DNS.
+    SetDns { net: String, on: bool },
     /// Проверить обновления сейчас.
     UpdateCheck,
     UpdateSet { mode: UpdateMode, prerelease: bool },
@@ -147,6 +149,19 @@ pub struct NetStatus {
     pub cert_not_after: Option<i64>,
     pub last_sync: Option<i64>,
     pub sync_error: Option<String>,
+    /// DNS, который раздаёт панель этой сети.
+    #[serde(default)]
+    pub dns: Option<NetDns>,
+    /// Пользователь разрешил отправлять туда запросы к зонам сети.
+    #[serde(default)]
+    pub dns_on: bool,
+}
+
+/// DNS-сервер внутри сети и зоны, которые он обслуживает (например, neb для site.neb).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NetDns {
+    pub server: String,
+    pub domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -297,6 +312,13 @@ pub fn valid_device_name(s: &str) -> bool {
 /// Код сети годится как имя папки.
 pub fn valid_slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 32 && s.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// Зона DNS вида neb или home.lan: она попадает в команды и реестр, поэтому только безопасные символы.
+pub fn valid_zone(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s.split('.').all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'))
 }
 
 pub fn now() -> i64 {

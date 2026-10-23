@@ -75,6 +75,17 @@ Nebula берётся из nixpkgs (`services.nebula-client.nebulaPackage`), д�
 зелёная до 60 мс, жёлтая до 150, дальше красная. Служба пингует только пока открыто окно и только тех, кто онлайн
 (Windows: `IcmpSendEcho`, Linux: ICMP-сокет без внешнего `ping`).
 
+### DNS сети
+
+Если в панели у сети задан DNS-сервер и зоны (например, `10.0.10.7` и `neb`), клиент отправляет запросы к
+`*.neb` на этот сервер, пока сеть подключена. Остальные имена резолвятся как обычно, поэтому если туннель
+упал, ломаются только имена сети. Сами записи (`site.neb` → `10.0.10.21`) заводятся на сервере, например
+перезаписями в AdGuard Home.
+
+- Windows: правило NRPT (видно в `Get-DnsClientNrptPolicy`), убирается при отключении сети и остановке службы.
+- Linux: `resolvectl dns` и `domain ~neb` на адаптере сети, нужен systemd-resolved.
+- Выключить для сети: «Настройки» → «DNS сетей» или `nebula-client-service dns СЕТЬ off`.
+
 ### Обновления
 
 Раз в сутки служба смотрит [релизы](https://github.com/Arseniy07955/nebula-client/releases). Настраивается в окне
@@ -114,6 +125,7 @@ nebula-client-service open [--server URL]       какие сети пускаю
 nebula-client-service join --name ИМЯ [--invite КОД] [--net СЕТЬ] [--server URL]
 nebula-client-service connect|disconnect|peers|leave СЕТЬ
 nebula-client-service sync [СЕТЬ] | logs
+nebula-client-service dns СЕТЬ on|off              имена сети через её DNS
 nebula-client-service update [check|install]    проверить / поставить найденное обновление
 nebula-client-service update auto|notify|off [--pre yes|no]
 nebula-client-service install | uninstall [--purge]   (Windows)
@@ -180,7 +192,7 @@ $nc = "$env:ProgramData\NebulaClient\nebula-join.ps1"
 | Метод | Что делает |
 |---|---|
 | `POST /v1/enroll` | `{invite?, name, public_key, conf_dir}` → сертификат, ca.crt, config.yml, токен. Без инвайта только в сеть со свободной регистрацией |
-| `POST /v1/sync` | по токену: продление (когда осталось меньше трети срока) и свежий конфиг |
+| `POST /v1/sync` | по токену: продление (когда осталось меньше трети срока), свежий конфиг и DNS сети (`dns: {server, domains}` или `null`) |
 | `GET /v1/peers` | по токену: участники сети и кто из них в сети |
 | `POST /v1/leave` | по токену: устройство выходит само, сертификат отзывается |
 
@@ -242,5 +254,10 @@ The member list shows the ping from this device to online peers over the Nebula 
 checks GitHub releases; on Windows it downloads `setup.exe`, verifies it against the release's `SHA256SUMS.txt`
 and installs it silently (Settings → Updates, or `nebula-client-service update auto|notify|off`). On Linux it only
 notifies.
+
+If the panel sets a DNS server and zones for a network (say `10.0.10.7` and `neb`), the client sends queries for
+`*.neb` to that server while the network is connected; everything else resolves as before. Windows uses an NRPT
+rule, Linux uses systemd-resolved (`resolvectl domain <tun> ~neb`). Turn it off per network in Settings or with
+`nebula-client-service dns NET off`.
 
 Licensed under GPL-3.0 and provided AS IS, without any warranty (sections 15 and 16 of the license).

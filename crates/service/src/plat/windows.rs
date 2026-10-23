@@ -228,6 +228,59 @@ pub fn migrate_script_install(dir: &Path) -> bool {
     ours
 }
 
+// ------------------------------------------------------------------------ DNS
+
+#[derive(Debug)]
+pub struct DnsRule {
+    pub slug: String,
+    /// NRPT адаптер не нужен, он для Linux
+    #[allow(dead_code)]
+    pub tun: String,
+    pub server: String,
+    pub domains: Vec<String>,
+}
+
+const NRPT: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+/// Начало имени наших правил NRPT ("nebulaClie" в hex), по нему находим и чистим свои.
+const NRPT_OURS: &str = "{6E656275-6C61-436C-6965-";
+
+fn nrpt_key(slug: &str) -> String {
+    // FNV-1a: у каждой сети своё постоянное имя ключа
+    let h = slug.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!(r"{NRPT}\{NRPT_OURS}{:012X}}}", h & 0xFFFF_FFFF_FFFF)
+}
+
+/// Правила NRPT: Windows отправляет запросы к зонам сети на её DNS, остальные как обычно.
+/// Так же делают VPN-клиенты; правила видны в Get-DnsClientNrptPolicy.
+pub fn set_dns(rules: &[DnsRule]) -> Result<(), String> {
+    let (_, list) = run("reg.exe", &["query", NRPT]);
+    for line in list.lines().map(str::trim).filter(|l| l.contains(NRPT_OURS)) {
+        run("reg.exe", &["delete", line, "/f"]);
+    }
+    let mut errs = vec![];
+    for r in rules {
+        let key = nrpt_key(&r.slug);
+        let names: Vec<String> = r.domains.iter().map(|d| format!(".{d}")).collect();
+        let comment = format!("Nebula Client: {}", r.slug);
+        for (name, ty, val) in [
+            ("Version", "REG_DWORD", "2"),
+            ("ConfigOptions", "REG_DWORD", "8"),
+            ("Name", "REG_MULTI_SZ", &names.join(r"\0")),
+            ("GenericDNSServers", "REG_SZ", &r.server),
+            ("IPSECCARestriction", "REG_SZ", ""),
+            ("Comment", "REG_SZ", &comment),
+        ] {
+            let (ok, out) = run("reg.exe", &["add", &key, "/v", name, "/t", ty, "/d", val, "/f"]);
+            if !ok {
+                errs.push(format!("{}: {}", r.slug, out.trim()));
+                break;
+            }
+        }
+    }
+    run("ipconfig.exe", &["/flushdns"]);
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+}
+
 pub const OS: &str = "windows";
 
 // ------------------------------------------------------------------ обновление
@@ -342,6 +395,16 @@ pub fn ping(ip: std::net::Ipv4Addr, timeout: std::time::Duration) -> Option<f32>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nrpt_names() {
+        let k = super::nrpt_key("main");
+        assert!(k.starts_with(r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{6E656275-6C61-436C-6965-"));
+        assert_eq!(k.rsplit('\\').next().unwrap().len(), 38);
+        assert_ne!(k, super::nrpt_key("friends"));
+        assert!(common::valid_zone("neb") && common::valid_zone("home.lan"));
+        assert!(!common::valid_zone("neb\"; x") && !common::valid_zone(".neb") && !common::valid_zone("-a.neb"));
+    }
+
     #[test]
     fn ping_loopback() {
         assert!(super::ping("127.0.0.1".parse().unwrap(), std::time::Duration::from_secs(1)).is_some());

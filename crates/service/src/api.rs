@@ -1,6 +1,6 @@
 //! HTTP к панели: /v1/enroll, /v1/sync, /v1/peers.
 
-use common::{tr, trf, Peer, CLIENT_VERSION};
+use common::{tr, trf, NetDns, Peer, CLIENT_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
@@ -30,6 +30,8 @@ pub struct Payload {
     pub peers: Vec<Peer>,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub dns: Option<NetDns>,
 }
 
 #[derive(Debug)]

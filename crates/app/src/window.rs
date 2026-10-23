@@ -433,6 +433,36 @@ impl App {
             }
         });
 
+        if !st.networks.is_empty() {
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style()).rounding(8.0).inner_margin(12.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(tr("DNS сетей", "Network DNS")).strong());
+                ui.label(
+                    RichText::new(tr(
+                        "Имена вроде site.neb спрашиваются у DNS-сервера внутри сети, пока она подключена. Остальной интернет резолвится как раньше.",
+                        "Names like site.neb are resolved by the DNS server inside the network while it is connected. Everything else resolves as before.",
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
+                for n in &st.networks {
+                    match &n.dns {
+                        Some(d) => {
+                            let zones = d.domains.iter().map(|z| format!("*.{z}")).collect::<Vec<_>>().join(", ");
+                            let mut on = n.dns_on;
+                            if ui.add_enabled(!acting, egui::Checkbox::new(&mut on, format!("{}: {zones} → {}", n.title, d.server))).changed() {
+                                self.act(ctx, Request::SetDns { net: n.slug.clone(), on }, "");
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new(trf!("{}: панель не задала DNS", "{}: the panel has no DNS set", n.title)).color(MUTED));
+                        }
+                    }
+                }
+            });
+        }
+
         #[cfg(windows)]
         {
             ui.add_space(8.0);

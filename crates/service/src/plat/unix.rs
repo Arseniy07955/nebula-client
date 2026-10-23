@@ -134,6 +134,50 @@ pub const OS: &str = "linux";
 // ------------------------------------------------------------------ обновление
 
 /// В Linux обновляют install.sh, пакетный менеджер или Nix, служба только сообщает о версии.
+#[derive(Debug)]
+pub struct DnsRule {
+    pub slug: String,
+    pub tun: String,
+    pub server: String,
+    pub domains: Vec<String>,
+}
+
+/// systemd-resolved: DNS и зоны-маршруты (~neb) на адаптере сети. Когда адаптер пропадает,
+/// resolved забывает их сам, поэтому убирать нужно только с живых адаптеров без правила.
+pub fn set_dns(rules: &[DnsRule]) -> Result<(), String> {
+    let mut known = DNS_SET.lock().unwrap();
+    for tun in known.iter().filter(|t| !rules.iter().any(|r| &&r.tun == t)) {
+        let _ = Command::new("resolvectl").args(["revert", tun]).output();
+    }
+    known.clear();
+    let mut errs = vec![];
+    for r in rules {
+        let routes: Vec<String> = r.domains.iter().map(|d| format!("~{d}")).collect();
+        let steps: [Vec<&str>; 3] = [
+            vec!["dns", &r.tun, &r.server],
+            [vec!["domain", r.tun.as_str()], routes.iter().map(String::as_str).collect()].concat(),
+            vec!["default-route", &r.tun, "false"],
+        ];
+        for args in steps {
+            match Command::new("resolvectl").args(&args).output() {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    errs.push(format!("{}: resolvectl {}: {}", r.slug, args[0], String::from_utf8_lossy(&o.stderr).trim()));
+                    break;
+                }
+                Err(e) => {
+                    errs.push(format!("resolvectl: {e} (нужен systemd-resolved)"));
+                    break;
+                }
+            }
+        }
+        known.push(r.tun.clone());
+    }
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+}
+
+static DNS_SET: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 pub fn run_installer(_setup: &Path, _dir: &Path) -> Result<(), String> {
     Err(common::tr("в Linux обновление ставится вручную", "on Linux the update is installed manually").into())
 }

@@ -12,7 +12,7 @@ use crate::logs::Logs;
 use crate::nebula::{self, Running};
 use crate::plat;
 use crate::update::{self, Upd};
-use common::{now, tr, trf, ConnState, NetStatus, OpenNet, Peer, Request, Response, Status, UpdateMode, CLIENT_VERSION};
+use common::{now, tr, trf, ConnState, NetDns, NetStatus, OpenNet, Peer, Request, Response, Status, UpdateMode, CLIENT_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -45,6 +45,11 @@ struct Settings {
     cert_not_after: Option<i64>,
     #[serde(default)]
     last_sync: Option<i64>,
+    /// DNS сети с панели, обновляется при синхронизации.
+    #[serde(default)]
+    dns: Option<NetDns>,
+    #[serde(default = "yes")]
+    dns_on: bool,
 }
 
 fn yes() -> bool {
@@ -53,7 +58,7 @@ fn yes() -> bool {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { want_up: true, cert_not_after: None, last_sync: None }
+        Settings { want_up: true, cert_not_after: None, last_sync: None, dns: None, dns_on: true }
     }
 }
 
@@ -97,6 +102,7 @@ struct Inner {
     nets: BTreeMap<String, Net>,
     busy: Option<String>,
     firewall_sig: Option<String>,
+    dns_sig: Option<String>,
 }
 
 pub struct Core {
@@ -273,6 +279,8 @@ impl Core {
                     cert_not_after: n.set.cert_not_after,
                     last_sync: n.set.last_sync,
                     sync_error: n.sync_error.clone(),
+                    dns: n.set.dns.clone(),
+                    dns_on: n.set.dns_on,
                 })
                 .collect(),
             busy: i.busy.clone(),
@@ -304,6 +312,7 @@ impl Core {
                 }
             },
             Request::Leave { net } => self.leave(&net).map(|_| Response::ok()),
+            Request::SetDns { net, on } => self.set_dns(&net, on).map(|_| Response::ok()),
             Request::UpdateCheck => self.update_check().map(|_| Response::ok()),
             Request::UpdateSet { mode, prerelease } => {
                 let mut u = self.upd.lock().unwrap();
@@ -398,7 +407,7 @@ impl Core {
         let dev = Device { server: server.into(), token, name: p.name.clone(), ip: p.ip.clone(), network: p.network.clone(), enrolled: now().to_string() };
         std::fs::write(dir.join("device.json"), serde_json::to_vec_pretty(&dev).unwrap()).map_err(|e| e.to_string())?;
         plat::private_file(&dir.join("device.json"));
-        let set = Settings { want_up: true, cert_not_after: Some(p.not_after), last_sync: Some(now()) };
+        let set = Settings { want_up: true, cert_not_after: Some(p.not_after), last_sync: Some(now()), dns: p.dns.clone(), dns_on: true };
         self.save_settings(&slug, &set);
         let mut net = Net::new(dev, set, tun);
         net.peers = p.peers;
@@ -456,6 +465,13 @@ impl Core {
         let Some(n) = i.nets.get_mut(slug) else { return Ok(()) };
         n.set.cert_not_after = Some(p.not_after);
         n.set.last_sync = Some(now());
+        if n.set.dns != p.dns {
+            self.logs.note(format!("[{slug}] {}", match &p.dns {
+                Some(d) => trf!("DNS сети: {} для {}", "network DNS: {} for {}", d.server, d.domains.join(", ")),
+                None => tr("панель убрала DNS сети", "the panel removed the network DNS").to_string(),
+            }));
+            n.set.dns = p.dns.clone();
+        }
         n.tun = tun;
         n.sync_error = None;
         n.peers = p.peers;
@@ -521,6 +537,17 @@ impl Core {
         Ok(())
     }
 
+    fn set_dns(&self, slug: &str, on: bool) -> Result<(), String> {
+        let mut i = self.inner.lock().unwrap();
+        let n = i.nets.get_mut(slug).ok_or_else(|| Self::no_net(slug))?;
+        n.set.dns_on = on;
+        let set = n.set.clone();
+        drop(i);
+        self.save_settings(slug, &set);
+        self.logs.note(format!("[{slug}] {}", if on { tr("DNS сети включён", "network DNS enabled") } else { tr("DNS сети выключен", "network DNS disabled") }));
+        Ok(())
+    }
+
     fn leave(&self, slug: &str) -> Result<(), String> {
         let _op = self.op.lock().unwrap();
         let mut i = self.inner.lock().unwrap();
@@ -551,6 +578,10 @@ impl Core {
                 c.stop();
             }
         }
+        // правила DNS указывают в туннель, без него они только мешают
+        if i.dns_sig.take().is_some() {
+            let _ = plat::set_dns(&[]);
+        }
     }
 
     // ------------------------------------------------------------- фоновые циклы
@@ -560,6 +591,7 @@ impl Core {
         while !self.stopping.load(Ordering::SeqCst) {
             self.firewall_tick();
             self.supervise_tick();
+            self.dns_tick();
             std::thread::sleep(Duration::from_secs(1));
         }
     }
@@ -581,6 +613,33 @@ impl Core {
             plat::firewall(&b.nebula, b.own, &cidrs);
         }
         self.inner.lock().unwrap().firewall_sig = Some(sig);
+    }
+
+    /// Запросы к зонам сети идут на её DNS, только пока сеть подключена: иначе сервер всё равно недоступен.
+    fn dns_tick(&self) {
+        let rules: Vec<plat::DnsRule> = {
+            let i = self.inner.lock().unwrap();
+            i.nets
+                .iter()
+                .filter(|(_, n)| n.state == ConnState::Running && n.set.dns_on)
+                .filter_map(|(slug, n)| {
+                    let d = n.set.dns.as_ref()?;
+                    let ok = d.server.parse::<std::net::Ipv4Addr>().is_ok() && !d.domains.is_empty() && d.domains.iter().all(|z| common::valid_zone(z));
+                    ok.then(|| plat::DnsRule { slug: slug.clone(), tun: n.tun.clone(), server: d.server.clone(), domains: d.domains.clone() })
+                })
+                .collect()
+        };
+        let sig = format!("{rules:?}");
+        if self.inner.lock().unwrap().dns_sig.as_deref() == Some(sig.as_str()) {
+            return;
+        }
+        if let Err(e) = plat::set_dns(&rules) {
+            self.logs.note(trf!("DNS сети не настроен: {}", "network DNS not set up: {}", e));
+        }
+        for r in &rules {
+            self.logs.note(format!("[{}] {}", r.slug, trf!("имена {} спрашиваются у {}", "names in {} are resolved by {}", r.domains.iter().map(|d| format!("*.{d}")).collect::<Vec<_>>().join(", "), r.server)));
+        }
+        self.inner.lock().unwrap().dns_sig = Some(sig);
     }
 
     fn supervise_tick(self: &Arc<Self>) {
