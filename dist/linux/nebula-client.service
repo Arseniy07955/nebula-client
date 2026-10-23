@@ -1,0 +1,20 @@
+[Unit]
+Description=Nebula Client
+Documentation=https://github.com/Arseniy07955/nebula-client
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nebula-client-service run
+Restart=always
+RestartSec=5
+# ключи и сертификаты: /var/lib/nebula-client, сокет управления: /run/nebula-client
+StateDirectory=nebula-client
+StateDirectoryMode=0700
+RuntimeDirectory=nebula-client
+RuntimeDirectoryMode=0755
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

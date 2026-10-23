@@ -1,56 +1,113 @@
 # Nebula Client
 
-Подключение Windows-ПК к сети [Nebula](https://github.com/slackhq/nebula) из панели
+Подключение ПК к сетям [Nebula](https://github.com/slackhq/nebula) из панели
 [Nebula Control](https://github.com/Arseniy07955/nebula-control). Вроде Hamachi для своих: поставил,
-нажал «Подключиться» и оказался в общей виртуальной сети с друзьями.
+нажал «Подключиться» и оказался в общей виртуальной сети с друзьями. Можно быть сразу в нескольких сетях,
+например в основной `10.0.10.0/24` и у друзей `10.77.0.0/24`.
+
+*English: see [below](#english).*
 
 Есть два варианта:
 
-- **Программа** (Rust): служба Windows, значок в трее и окно. Основной вариант.
-- **PowerShell-скрипт** `nebula-join.ps1`: одна команда без установки, описан ниже.
+- **Программа** (Rust): служба, значок в трее и окно. Windows 10/11 и Linux (в том числе NixOS). Основной вариант.
+- **PowerShell-скрипт** `nebula-join.ps1`: одна команда без установки, только Windows и одна сеть, описан ниже.
 
 ## Программа
 
-### Установка
+### Установка в Windows
 
-Распакуйте архив и запустите `install.cmd` (попросит права администратора). Он копирует программу
-в `C:\Program Files\Nebula Client`, ставит службу `NebulaClient` и запускает значок в трее.
-Дальше нажмите на значок, введите имя устройства и нажмите «Подключиться». Если сеть закрытая,
-понадобится инвайт. Удаление: `uninstall.cmd` в той же папке.
+Запустите `nebula-client-<версия>-setup.exe` из [релизов](https://github.com/Arseniy07955/nebula-client/releases).
+Установщик спросит права администратора, положит программу в `C:\Program Files\Nebula Client`, поставит службу
+`NebulaClient`, ярлык в «Пуск» и (по желанию) автозапуск значка в трее. Nebula 1.9.3 уже внутри, GitHub для
+первого подключения не нужен. Поверх версии 0.2 ставится без удаления, подключение сохранится.
+
+Удаление через «Параметры → Приложения». Установщик спросит, стереть ли ключи: если да, устройство сначала выйдет
+из своих сетей на панели.
+
+### Установка в Linux
+
+Нужны systemd и glibc 2.28+ (Debian 10, Ubuntu 20.04, Fedora, Arch и новее). Окно работает в X11 и Wayland,
+значка в трее в Linux нет.
+
+```bash
+tar xf nebula-client-<версия>-linux-x86_64.tar.gz
+cd nebula-client-<версия>-linux-x86_64
+sudo ./install.sh
+```
+
+Скрипт кладёт программу в `/usr/local/bin`, ставит службу `nebula-client` и ярлык в меню, создаёт группу
+`nebula-client` и добавляет в неё вас: управлять службой из окна могут только её участники (перезайдите в систему).
+Если в `PATH` есть `nebula` и `nebula-cert`, служба возьмёт их, иначе скачает официальный релиз и сверит SHA256.
+Удаление: `sudo ./uninstall.sh [--purge]`.
+
+### NixOS
+
+```nix
+# flake.nix системы
+inputs.nebula-client.url = "github:Arseniy07955/nebula-client";
+
+# configuration.nix
+imports = [ inputs.nebula-client.nixosModules.default ];
+services.nebula-client = {
+  enable = true;
+  users = [ "alice" ];                             # кто может управлять из окна
+  trustedInterfaces = [ "nebula1" "nb-friends" ];  # пустить пиров мимо брандмауэра NixOS
+};
+```
+
+Nebula берётся из nixpkgs (`services.nebula-client.nebulaPackage`), данные лежат в `/var/lib/nebula-client`.
+Сборка через Nix пока не проверялась на живой системе; если что-то не так, пишите в issues.
+
+### Несколько сетей
+
+У каждой сети свой ключ устройства, сертификат и свой процесс `nebula` со своим адаптером (`nebula1`, `nb-friends`
+и т. п.; при совпадении имён программа переименует адаптер). Сети включаются и выключаются отдельно: в окне
+переключателем сверху, в трее галочками. «+ Добавить сеть» спрашивает имя устройства и, если нужно, инвайт; если на
+панели несколько сетей со свободной регистрацией, нужную можно выбрать там же. «Выйти из сети» стирает ключ этой сети
+и отзывает сертификат на панели.
+
+Язык окна, трея и сообщений панели берётся из системы (русский или английский). Задать вручную:
+`NEBULA_CLIENT_LANG=en` или `ru`.
 
 ### Как устроено
 
 | Часть | Что делает | Память |
 |---|---|---|
-| `nebula-client-service.exe` | служба от SYSTEM: вход в сеть, запуск `nebula.exe`, продление сертификата раз в 6 часов, брандмауэр | ~6 МБ |
-| `nebula-client.exe` | значок в трее: цвет состояния, подключить/отключить, автозапуск | ~9 МБ |
-| `nebula-client.exe --window` | окно на egui, отдельный процесс: закрыли окно — процесс завершился | ~60 МБ, пока открыто |
+| `nebula-client-service` | служба (SYSTEM в Windows, root в Linux): вход в сети, `nebula` для каждой, продление сертификатов раз в 6 часов, брандмауэр Windows | ~6 МБ |
+| `nebula-client` (Windows) | значок в трее: общий цвет состояния, сети галочками, автозапуск | ~9 МБ |
+| `nebula-client --window` (в Linux просто `nebula-client`) | окно на egui, отдельный процесс: закрыли окно — процесс завершился | ~60 МБ, пока открыто |
 
-- Служба скачивает Nebula 1.9.3 с GitHub и сверяет SHA256, создаёт ключ устройства (приватная часть
-  не покидает ПК), получает сертификат и конфиг, держит `nebula.exe` запущенной и перезапускает при падении.
-  `nebula.exe` сидит в job-объекте службы: если служба упадёт, Windows завершит и его.
-- Окно и tray говорят со службой через именованный канал `\\.\pipe\nebula-client`. Писать в него могут
-  SYSTEM, администраторы и пользователи, вошедшие в систему; удалённые подключения отклоняются.
-- Данные лежат в `C:\ProgramData\NebulaClient` с доступом только для SYSTEM и администраторов.
-  Формат тот же, что у PowerShell-скрипта: устройство, подключённое скриптом, подхватывается программой,
-  а его служба `Nebula` и задача планировщика убираются.
-- Брандмауэр: входящие для `nebula.exe` и ping из подсети сети, адаптер Nebula переводится в «частную» сеть.
+- Ключ устройства создаётся на ПК, приватная часть никуда не уходит. Архив Nebula сверяется по SHA256.
+- `nebula` сидит в job-объекте службы (Windows) или получает сигнал при её смерти (Linux): упала служба — завершилась и Nebula.
+- Окно и трей говорят со службой по JSON: в Windows через канал `\\.\pipe\nebula-client` (SYSTEM, администраторы,
+  вошедшие пользователи, без удалённых подключений), в Linux через сокет `/run/nebula-client/nebula-client.sock`
+  (root и группа `nebula-client`).
+- Данные: `C:\ProgramData\NebulaClient\networks\<сеть>` или `/var/lib/nebula-client/networks/<сеть>`, доступ только
+  у администраторов. Устройство, подключённое PowerShell-скриптом или версией 0.2, переносится само.
 
-Команды службы для отладки: `nebula-client-service status | peers | logs | connect | disconnect | sync | leave`,
-`enroll --name ИМЯ [--invite КОД] [--server URL]`, `install`, `uninstall [--purge]`, `run` (в консоли).
+Команды службы:
+
+```
+nebula-client-service status                    сети и их состояние
+nebula-client-service open [--server URL]       какие сети пускают без инвайта
+nebula-client-service join --name ИМЯ [--invite КОД] [--net СЕТЬ] [--server URL]
+nebula-client-service connect|disconnect|peers|leave СЕТЬ
+nebula-client-service sync [СЕТЬ] | logs
+nebula-client-service install | uninstall [--purge]   (Windows)
+nebula-client-service run                       в консоли или под systemd
+```
 
 ### Сборка
 
-Нужен Rust (stable). На цели `x86_64-pc-windows-gnu` в `PATH` должен быть MinGW (`gcc`, `dlltool`).
+Нужен Rust stable. Свой адрес панели по умолчанию: переменная `NEBULA_CLIENT_SERVER` при сборке.
 
-```bash
-cargo build --release
-# свой адрес панели по умолчанию в окне входа:
-NEBULA_CLIENT_SERVER=https://example.org/nebula cargo build --release
-```
-
-Готовые файлы: `target/release/nebula-client.exe` и `target/release/nebula-client-service.exe`,
-рядом с ними кладутся `dist/install.cmd` и `dist/uninstall.cmd`.
+- **Windows** (`x86_64-pc-windows-gnu`, в `PATH` MinGW: `gcc`, `dlltool`, `windres`): `cargo build --release`.
+  Установщик: [Inno Setup 6](https://jrsoftware.org/isinfo.php), затем
+  `powershell -File dist\windows\build.ps1 -Iscc путь\ISCC.exe` → `dist/out/nebula-client-<версия>-setup.exe`.
+- **Linux**: `cargo build --release`. Из Windows или macOS через [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
+  `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28` (и `aarch64-…`), потом
+  `python dist/linux/package.py` → архивы в `dist/out`.
+- **Nix**: `nix build`.
 
 ## PowerShell-скрипт
 
@@ -102,6 +159,9 @@ $nc = "$env:ProgramData\NebulaClient\nebula-join.ps1"
 | `POST /v1/enroll` | `{invite?, name, public_key, conf_dir}` → сертификат, ca.crt, config.yml, токен. Без инвайта только в сеть со свободной регистрацией |
 | `POST /v1/sync` | по токену: продление (когда осталось меньше трети срока) и свежий конфиг |
 | `GET /v1/peers` | по токену: участники сети и кто из них в сети |
+| `POST /v1/leave` | по токену: устройство выходит само, сертификат отзывается |
+
+Если клиент прислал `Accept-Language: en`, ошибки приходят по-английски.
 
 Сертификаты по инвайту короткие (по умолчанию 30 дней) и продлеваются сами. Отзыв в панели значит, что устройство
 больше не продлится, а его отпечаток попадёт в blocklist остальных при их синхронизации.
@@ -114,16 +174,16 @@ $nc = "$env:ProgramData\NebulaClient\nebula-join.ps1"
 
 - Nebula работает на уровне IP, broadcast не проходит. Игры, которые ищут друг друга только «в локальной сети»,
   не увидят друг друга, подключаться нужно по IP.
-- Одна сеть на ПК. PowerShell-скрипт ставит службу `Nebula`, поэтому рядом с другой установкой Nebula
-  как службы не встанет (скрипт это проверит и остановится). У программы своя служба `NebulaClient`.
-- Windows 10/11. Программа собирается под x64, скрипт работает на x64 и ARM64 (Windows PowerShell 5.1 и новее).
-- Бинарники не подписаны, SmartScreen и антивирусы могут ругаться на `nebula-client*.exe`, `nebula.exe`
-  и драйвер Wintun.
+- PowerShell-скрипт держит одну сеть и ставит службу `Nebula`, рядом с другой установкой Nebula как службы
+  он не встанет (проверит и остановится). У программы своя служба и сколько угодно сетей.
+- Windows 10/11 x64 (скрипт ещё и ARM64), Linux x86_64 и aarch64 с systemd.
+- Бинарники не подписаны, SmartScreen и антивирусы могут ругаться на установщик, `nebula-client*.exe`,
+  `nebula.exe` и драйвер Wintun.
 
 ## Версия Nebula
 
-Версия и SHA256 зашиты в начале скрипта (`$NebulaVersion`, `$NebulaBuilds`). Суммы берутся из `SHASUM256.txt`
-релиза. Менять версию стоит осознанно, вместе с lighthouse и релеями сети.
+Версия и SHA256 зашиты в `crates/service/src/nebula.rs`, `dist/windows/build.ps1` и в начале скрипта
+(`$NebulaVersion`, `$NebulaBuilds`). Суммы берутся из `SHASUM256.txt` релиза. Менять версию стоит осознанно, вместе с lighthouse и релеями сети.
 
 ## Лицензия
 
@@ -136,3 +196,23 @@ $nc = "$env:ProgramData\NebulaClient\nebula-join.ps1"
 
 Nebula скачивается с официальных релизов [slackhq/nebula](https://github.com/slackhq/nebula) (MIT),
 драйвер Wintun идёт в её архиве под своей лицензией.
+
+## English
+
+Nebula Client joins a PC to [Nebula](https://github.com/slackhq/nebula) overlay networks managed by
+[Nebula Control](https://github.com/Arseniy07955/nebula-control), Hamachi-style: install, press Connect, and you share
+a virtual LAN with your friends. One device can be in several networks at once, each with its own key, certificate,
+`nebula` process and adapter.
+
+- **Windows 10/11**: run `nebula-client-<version>-setup.exe` from the releases. It installs the `NebulaClient`
+  service, a Start menu shortcut and an optional tray icon at sign-in. Nebula 1.9.3 is bundled.
+- **Linux** (systemd, glibc 2.28+, X11 or Wayland): unpack `nebula-client-<version>-linux-<arch>.tar.gz` and run
+  `sudo ./install.sh`. Members of the `nebula-client` group can control the service from the window.
+- **NixOS**: add the flake, import `nixosModules.default` and set `services.nebula-client.enable = true;` and
+  `users = [ "you" ];` (all options are in the NixOS section above).
+
+The UI follows the system language (Russian or English); override it with `NEBULA_CLIENT_LANG=en`. The service CLI
+(`nebula-client-service status | open | join | connect | disconnect | peers | sync | leave | logs`) prints help when
+run without arguments. Leaving a network deletes its key and revokes the certificate on the panel.
+
+Licensed under GPL-3.0 and provided AS IS, without any warranty (sections 15 and 16 of the license).

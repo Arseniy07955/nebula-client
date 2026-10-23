@@ -5,3 +5,5 @@ target/
 config.yml
 device.json
 bin/
+dist/out/
+dist/windows/payload/

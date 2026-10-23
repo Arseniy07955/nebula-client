@@ -1,10 +1,9 @@
 //! HTTP к панели: /v1/enroll, /v1/sync, /v1/peers.
 
-use common::{Peer, CLIENT_VERSION};
+use common::{tr, trf, Peer, CLIENT_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -54,16 +53,13 @@ impl std::fmt::Display for ApiErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiErr::Http(_, m) => write!(f, "{m}"),
-            ApiErr::Net(m) => write!(f, "нет связи с панелью: {m}"),
+            ApiErr::Net(m) => write!(f, "{}", trf!("нет связи с панелью: {}", "cannot reach the panel: {}", m)),
         }
     }
 }
 
 fn agent() -> ureq::Agent {
-    // TLS через SChannel Windows: системные корневые сертификаты, без своих C-библиотек
-    let tls = native_tls::TlsConnector::new().expect("TLS недоступен");
     ureq::AgentBuilder::new()
-        .tls_connector(Arc::new(tls))
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .user_agent(CLIENT_VERSION)
@@ -72,13 +68,13 @@ fn agent() -> ureq::Agent {
 
 fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value, ApiErr> {
     match r {
-        Ok(resp) => resp.into_json().map_err(|e| ApiErr::Net(format!("непонятный ответ: {e}"))),
+        Ok(resp) => resp.into_json().map_err(|e| ApiErr::Net(trf!("непонятный ответ: {}", "unexpected answer: {}", e))),
         Err(ureq::Error::Status(code, resp)) => {
             let msg = resp
                 .into_json::<Value>()
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-                .unwrap_or_else(|| format!("панель ответила {code}"));
+                .unwrap_or_else(|| trf!("панель ответила {}", "the panel answered {}", code));
             Err(ApiErr::Http(code, msg))
         }
         Err(e) => Err(ApiErr::Net(e.to_string())),
@@ -86,7 +82,7 @@ fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value, ApiErr> {
 }
 
 pub fn post(server: &str, path: &str, token: Option<&str>, body: Value) -> Result<Value, ApiErr> {
-    let mut req = agent().post(&format!("{server}{path}"));
+    let mut req = agent().post(&format!("{server}{path}")).set("Accept-Language", common::lang());
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
@@ -94,7 +90,7 @@ pub fn post(server: &str, path: &str, token: Option<&str>, body: Value) -> Resul
 }
 
 pub fn get(server: &str, path: &str, token: Option<&str>) -> Result<Value, ApiErr> {
-    let mut req = agent().get(&format!("{server}{path}"));
+    let mut req = agent().get(&format!("{server}{path}")).set("Accept-Language", common::lang());
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
@@ -102,14 +98,14 @@ pub fn get(server: &str, path: &str, token: Option<&str>) -> Result<Value, ApiEr
 }
 
 pub fn payload(v: Value) -> Result<Payload, ApiErr> {
-    serde_json::from_value(v).map_err(|e| ApiErr::Net(format!("непонятный ответ панели: {e}")))
+    serde_json::from_value(v).map_err(|e| ApiErr::Net(trf!("непонятный ответ панели: {}", "unexpected panel answer: {}", e)))
 }
 
 /// Скачать файл целиком в память (архив Nebula ~14 МБ).
 pub fn download(url: &str) -> Result<Vec<u8>, String> {
-    let resp = agent().get(url).call().map_err(|e| format!("не удалось скачать {url}: {e}"))?;
+    let resp = agent().get(url).call().map_err(|e| trf!("не удалось скачать {}: {}", "could not download {}: {}", url, e))?;
     let mut buf = Vec::new();
-    resp.into_reader().take(64 << 20).read_to_end(&mut buf).map_err(|e| format!("обрыв при скачивании: {e}"))?;
+    resp.into_reader().take(64 << 20).read_to_end(&mut buf).map_err(|e| trf!("обрыв при скачивании: {}", "download interrupted: {}", e))?;
     Ok(buf)
 }
 
@@ -117,7 +113,7 @@ pub fn check_server(s: &str) -> Result<String, String> {
     let s = s.trim().trim_end_matches('/').to_string();
     let local = s.starts_with("http://127.0.0.1:") || s.starts_with("http://localhost:");
     if !(s.starts_with("https://") || local) {
-        return Err("Адрес панели должен начинаться с https://".into());
+        return Err(tr("Адрес панели должен начинаться с https://", "The panel address must start with https://").into());
     }
     Ok(s)
 }

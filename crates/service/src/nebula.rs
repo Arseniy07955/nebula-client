@@ -1,158 +1,172 @@
-//! Бинарники Nebula: скачивание с проверкой SHA256, ключ устройства и запуск nebula.exe.
+//! Бинарники Nebula: где взять (скачать с проверкой SHA256 или системные), ключ устройства и запуск.
 
 use crate::logs::Logs;
+use crate::plat;
+use common::{tr, trf};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-};
 
 pub const NEBULA_VERSION: &str = "1.9.3";
-pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Официальные релизы slackhq/nebula, суммы из SHASUM256.txt релиза.
+#[cfg(windows)]
 const BUILDS: &[(&str, &str, &str)] = &[
-    ("AMD64", "nebula-windows-amd64.zip", "65ead0e8104a36e35230511e8d983458353a0edb6c4e332464da727b8efce11e"),
-    ("ARM64", "nebula-windows-arm64.zip", "599c49e2a1360eb448795e48b1afe9259bd79043d41e959f1e920d1a8238ef58"),
+    ("x86_64", "nebula-windows-amd64.zip", "65ead0e8104a36e35230511e8d983458353a0edb6c4e332464da727b8efce11e"),
+    ("aarch64", "nebula-windows-arm64.zip", "599c49e2a1360eb448795e48b1afe9259bd79043d41e959f1e920d1a8238ef58"),
+];
+#[cfg(unix)]
+const BUILDS: &[(&str, &str, &str)] = &[
+    ("x86_64", "nebula-linux-amd64.tar.gz", "3aa3dc989a50791602593f182e119e37e4bef6bc12bbc99a1c91ad2a046aaa60"),
+    ("aarch64", "nebula-linux-arm64.tar.gz", "f0a3ba520a960c5f004b64df6567e57904f204f22c83f3c525f99c902f583fea"),
 ];
 
-pub fn bin_dir(dir: &Path) -> PathBuf {
-    dir.join("bin")
+const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
+
+/// Где лежат nebula и nebula-cert.
+pub struct Bins {
+    pub nebula: PathBuf,
+    pub cert: PathBuf,
+    /// Наши (скачанные), а не системные: их можно обновлять и разрешать в брандмауэре.
+    pub own: bool,
 }
 
-pub fn nebula_exe(dir: &Path) -> PathBuf {
-    bin_dir(dir).join("nebula.exe")
+fn own_dir(data: &Path) -> PathBuf {
+    data.join("bin")
 }
 
-fn arch() -> String {
-    std::env::var("PROCESSOR_ARCHITEW6432")
-        .or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE"))
-        .unwrap_or_default()
-        .to_uppercase()
+fn in_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
-pub fn ensure_binaries(dir: &Path, progress: &dyn Fn(&str)) -> Result<(), String> {
-    let bin = bin_dir(dir);
+/// В Linux сначала системная Nebula (NixOS, пакет дистрибутива), в Windows всегда своя.
+pub fn bins(data: &Path) -> Bins {
+    if let Some(d) = std::env::var_os("NEBULA_BIN_DIR") {
+        let d = PathBuf::from(d);
+        return Bins { nebula: d.join(format!("nebula{EXE}")), cert: d.join(format!("nebula-cert{EXE}")), own: false };
+    }
+    if cfg!(unix) {
+        if let (Some(n), Some(c)) = (in_path("nebula"), in_path("nebula-cert")) {
+            return Bins { nebula: n, cert: c, own: false };
+        }
+    }
+    let d = own_dir(data);
+    Bins { nebula: d.join(format!("nebula{EXE}")), cert: d.join(format!("nebula-cert{EXE}")), own: true }
+}
+
+pub fn ensure_binaries(data: &Path, progress: &dyn Fn(&str)) -> Result<Bins, String> {
+    let b = bins(data);
+    if !b.own {
+        return if b.nebula.exists() && b.cert.exists() {
+            Ok(b)
+        } else {
+            Err(trf!("не найдены {} и {}", "{} and {} not found", b.nebula.display(), b.cert.display()))
+        };
+    }
+    let bin = own_dir(data);
     let marker = bin.join("VERSION");
-    if nebula_exe(dir).exists() && std::fs::read_to_string(&marker).map(|v| v.trim() == NEBULA_VERSION).unwrap_or(false) {
-        return Ok(());
+    if b.nebula.exists() && std::fs::read_to_string(&marker).map(|v| v.trim() == NEBULA_VERSION).unwrap_or(false) {
+        return Ok(b);
     }
-    let a = arch();
-    let (_, file, sum) = BUILDS.iter().find(|b| b.0 == a).ok_or(format!("архитектура {a} не поддерживается, нужна AMD64 или ARM64"))?;
-    progress(&format!("Скачиваю Nebula {NEBULA_VERSION}"));
-    let url = format!("https://github.com/slackhq/nebula/releases/download/v{NEBULA_VERSION}/{file}");
-    let data = crate::api::download(&url)?;
-    let got = format!("{:x}", Sha256::digest(&data));
+    let arch = std::env::consts::ARCH;
+    let (_, file, sum) = BUILDS
+        .iter()
+        .find(|x| x.0 == arch)
+        .ok_or_else(|| trf!("архитектура {} не поддерживается", "architecture {} is not supported", arch))?;
+    // установщик кладёт официальный архив рядом со службой: тогда GitHub не нужен
+    let bundled = std::env::current_exe().ok().map(|e| e.with_file_name(file)).and_then(|p| std::fs::read(p).ok());
+    let data_bytes = match bundled {
+        Some(b) if format!("{:x}", Sha256::digest(&b)) == *sum => b,
+        _ => {
+            progress(&trf!("Скачиваю Nebula {}", "Downloading Nebula {}", NEBULA_VERSION));
+            let url = format!("https://github.com/slackhq/nebula/releases/download/v{NEBULA_VERSION}/{file}");
+            crate::api::download(&url)?
+        }
+    };
+    let got = format!("{:x}", Sha256::digest(&data_bytes));
     if got != *sum {
-        return Err(format!("контрольная сумма архива Nebula не совпала ({got}), установка остановлена"));
+        return Err(trf!(
+            "контрольная сумма архива Nebula не совпала ({}), установка остановлена",
+            "Nebula archive checksum mismatch ({}), installation stopped",
+            got
+        ));
     }
-    progress("Распаковываю Nebula");
+    progress(tr("Распаковываю Nebula", "Unpacking Nebula"));
     let _ = std::fs::remove_dir_all(&bin);
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("архив Nebula повреждён: {e}"))?;
-    for i in 0..zip.len() {
-        let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
-        let Some(rel) = f.enclosed_name() else { continue };
-        let out = bin.join(rel);
-        if f.is_dir() {
-            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-            continue;
-        }
-        if let Some(p) = out.parent() {
-            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
-        }
-        let mut w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-        std::io::copy(&mut f, &mut w).map_err(|e| e.to_string())?;
-    }
+    std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+    plat::unpack(&data_bytes, &bin)?;
     std::fs::write(&marker, NEBULA_VERSION).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(b)
 }
 
 fn run_hidden(exe: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| format!("{}: {e}", exe.display()))?;
+    let mut cmd = Command::new(exe);
+    cmd.args(args);
+    plat::quiet(&mut cmd);
+    let out = cmd.output().map_err(|e| format!("{}: {e}", exe.display()))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if out.status.success() {
         Ok(text)
     } else {
-        Err(text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("ошибка").to_string())
+        Err(text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error").to_string())
     }
 }
 
-/// Ключ устройства создаётся один раз и никуда не уходит, панели нужна только публичная часть.
-pub fn ensure_key(dir: &Path) -> Result<String, String> {
+/// Ключ создаётся в папке сети один раз и никуда не уходит, панели нужна только публичная часть.
+pub fn ensure_key(bins: &Bins, dir: &Path) -> Result<String, String> {
     let key = dir.join("host.key");
     let pubp = dir.join("host.pub");
     if !key.exists() || !pubp.exists() {
         let _ = std::fs::remove_file(&key);
         let _ = std::fs::remove_file(&pubp);
-        run_hidden(
-            &bin_dir(dir).join("nebula-cert.exe"),
-            &["keygen", "-out-key", &key.to_string_lossy(), "-out-pub", &pubp.to_string_lossy()],
-        )
-        .map_err(|e| format!("nebula-cert не смог создать ключ: {e}"))?;
+        run_hidden(&bins.cert, &["keygen", "-out-key", &key.to_string_lossy(), "-out-pub", &pubp.to_string_lossy()])
+            .map_err(|e| trf!("nebula-cert не смог создать ключ: {}", "nebula-cert could not create a key: {}", e))?;
+        plat::private_file(&key);
     }
     std::fs::read_to_string(&pubp).map_err(|e| e.to_string())
 }
 
-pub fn test_config(dir: &Path) -> Result<(), String> {
-    run_hidden(&nebula_exe(dir), &["-test", "-config", &dir.join("config.yml").to_string_lossy()])
+pub fn test_config(bins: &Bins, dir: &Path) -> Result<(), String> {
+    run_hidden(&bins.nebula, &["-test", "-config", &dir.join("config.yml").to_string_lossy()])
         .map(|_| ())
-        .map_err(|e| format!("Nebula не приняла конфиг: {e}"))
+        .map_err(|e| trf!("Nebula не приняла конфиг: {}", "Nebula rejected the config: {}", e))
 }
 
-/// Запущенный nebula.exe. Сидит в job-объекте: если служба упадёт, Windows убьёт и его,
-/// так что второй экземпляр с тем же адаптером не появится.
+/// Запущенная nebula одной сети. Если служба умрёт, ОС завершит и её (job-объект в Windows,
+/// PDEATHSIG в Linux), так что второй экземпляр с тем же адаптером не появится.
 pub struct Running {
     child: Child,
-    job: HANDLE,
+    _guard: plat::ChildGuard,
     pub started: std::time::Instant,
     pub net_ready: bool,
 }
 
-unsafe impl Send for Running {}
-
 impl Running {
-    pub fn spawn(dir: &Path, logs: Arc<Logs>) -> Result<Running, String> {
-        let mut child = Command::new(nebula_exe(dir))
-            .args(["-config", &dir.join("config.yml").to_string_lossy()])
+    pub fn spawn(bins: &Bins, dir: &Path, tag: &str, logs: Arc<Logs>) -> Result<Running, String> {
+        let mut cmd = Command::new(&bins.nebula);
+        cmd.args(["-config", &dir.join("config.yml").to_string_lossy()])
             .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("не удалось запустить nebula.exe: {e}"))?;
-        let job = unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if !job.is_null() {
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const _,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-                AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
-            }
-            job
-        };
-        for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-                       child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
+            .stderr(Stdio::piped());
+        plat::quiet(&mut cmd);
+        plat::die_with_parent(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| trf!("не удалось запустить nebula: {}", "could not start nebula: {}", e))?;
+        let guard = plat::guard_child(&child);
+        let streams: [Option<Box<dyn std::io::Read + Send>>; 2] =
+            [child.stdout.take().map(|s| Box::new(s) as _), child.stderr.take().map(|s| Box::new(s) as _)];
+        for s in streams.into_iter().flatten() {
             let logs = logs.clone();
+            let tag = tag.to_string();
             std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                    logs.push(line);
+                for line in BufReader::new(s).lines().map_while(Result::ok) {
+                    logs.push(format!("[{tag}] {line}"));
                 }
             });
         }
-        Ok(Running { child, job, started: std::time::Instant::now(), net_ready: false })
+        Ok(Running { child, _guard: guard, started: std::time::Instant::now(), net_ready: false })
     }
 
     /// Some(код), если процесс уже завершился.
@@ -165,16 +179,6 @@ impl Running {
     }
 
     pub fn stop(mut self) {
-        // адаптер Wintun живёт, пока жив процесс, и удаляется вместе с ним
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        if !self.job.is_null() {
-            unsafe { CloseHandle(self.job) };
-        }
+        plat::stop_child(&mut self.child);
     }
 }

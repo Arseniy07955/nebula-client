@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Nebula Client
+Comment=Join Nebula overlay networks
+Comment[ru]=Подключение к сетям Nebula
+Exec=nebula-client
+Icon=nebula-client
+Terminal=false
+Categories=Network;
+Keywords=nebula;vpn;mesh;
+StartupWMClass=nebula-client

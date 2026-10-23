@@ -1,38 +1,94 @@
-//! Значок в трее: цвет показывает состояние, меню подключает и отключает, клик открывает окно.
+//! Значок в трее: цвет показывает общее состояние, в меню у каждой сети своя галочка, клик открывает окно.
 //! Статус спрашивается у службы раз в 3 секунды, это один короткий запрос по локальному каналу.
 
 use crate::icons::{self, Look};
 use crate::sys;
-use common::{ConnState, Request, Status};
+use common::{tr, trf, ConnState, NetStatus, Request, Status};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT,
 };
 
 fn icon(look: Look) -> Icon {
-    Icon::from_rgba(icons::rgba(look), icons::SIZE, icons::SIZE).expect("значок")
+    Icon::from_rgba(icons::rgba(look), icons::SIZE, icons::SIZE).expect("icon")
+}
+
+fn net_line(n: &NetStatus) -> String {
+    let state = match (n.want_up, n.state) {
+        (false, _) => tr("отключено", "off").to_string(),
+        (true, ConnState::Running) => n.ip.clone(),
+        (true, ConnState::Error) => tr("ошибка", "error").to_string(),
+        (true, _) => tr("подключаюсь…", "connecting…").to_string(),
+    };
+    format!("{}: {state}", n.title)
 }
 
 fn describe(st: &Option<Status>, svc_err: bool) -> String {
     if svc_err {
-        return "Служба Nebula Client не запущена".into();
+        return tr("Служба Nebula Client не запущена", "Nebula Client service is not running").into();
     }
     let Some(s) = st else { return "Nebula Client".into() };
-    if !s.enrolled {
-        return "Не подключено к сети".into();
-    }
     if let Some(b) = &s.busy {
         return b.clone();
     }
-    match s.state {
-        ConnState::Running => format!("В сети «{}»: {}", s.network, s.ip),
-        ConnState::Starting => "Подключаюсь…".into(),
-        ConnState::Error => format!("Ошибка: {}", s.error.clone().unwrap_or_default()),
-        ConnState::Stopped => "Отключено".into(),
+    if s.networks.is_empty() {
+        return tr("Нет сетей", "No networks").into();
     }
+    s.networks.iter().map(net_line).collect::<Vec<_>>().join("\n")
+}
+
+/// Общий цвет: ошибка важнее, потом «подключаюсь», потом «в сети».
+fn aggregate(st: &Option<Status>, svc_err: bool) -> Look {
+    if svc_err {
+        return Look::Error;
+    }
+    let Some(s) = st else { return Look::Down };
+    let on: Vec<ConnState> = s.networks.iter().filter(|n| n.want_up).map(|n| n.state).collect();
+    if on.contains(&ConnState::Error) {
+        Look::Error
+    } else if on.iter().any(|s| *s != ConnState::Running) {
+        Look::Starting
+    } else if on.is_empty() {
+        Look::Down
+    } else {
+        Look::Up
+    }
+}
+
+struct Items {
+    menu: Menu,
+    status: MenuItem,
+    open: MenuItem,
+    auto: CheckMenuItem,
+    quit: MenuItem,
+    /// (id пункта, slug сети)
+    nets: Vec<(MenuId, String, CheckMenuItem)>,
+    slugs: Vec<String>,
+}
+
+fn build(st: &Option<Status>) -> Items {
+    let status = MenuItem::new("Nebula Client", false, None);
+    let open = MenuItem::new(tr("Открыть", "Open"), true, None);
+    let auto = CheckMenuItem::new(tr("Запускать при входе в Windows", "Start at Windows sign-in"), true, sys::autostart_enabled(), None);
+    let quit = MenuItem::new(tr("Выход", "Quit"), true, None);
+    let menu = Menu::new();
+    let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &open]);
+    let mut nets = Vec::new();
+    let networks = st.as_ref().map(|s| s.networks.clone()).unwrap_or_default();
+    if !networks.is_empty() {
+        let _ = menu.append(&PredefinedMenuItem::separator());
+    }
+    for n in &networks {
+        let item = CheckMenuItem::new(trf!("Сеть «{}»", "Network \"{}\"", n.title), true, n.want_up, None);
+        let _ = menu.append(&item);
+        nets.push((item.id().clone(), n.slug.clone(), item));
+    }
+    let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &auto, &quit]);
+    let slugs = networks.iter().map(|n| n.slug.clone()).collect();
+    Items { menu, status, open, auto, quit, nets, slugs }
 }
 
 pub fn run() {
@@ -46,26 +102,18 @@ pub fn run() {
         sys::set_autostart(true);
     }
 
-    let status_item = MenuItem::new("Nebula Client", false, None);
-    let open_item = MenuItem::new("Открыть", true, None);
-    let toggle_item = MenuItem::new("Подключиться", false, None);
-    let auto_item = CheckMenuItem::new("Запускать при входе в Windows", true, sys::autostart_enabled(), None);
-    let quit_item = MenuItem::new("Выход", true, None);
-    let menu = Menu::new();
-    let _ = menu.append_items(&[&status_item, &PredefinedMenuItem::separator(), &open_item, &toggle_item, &PredefinedMenuItem::separator(), &auto_item, &quit_item]);
-
+    let mut items = build(&None);
     let mut look = Look::Down;
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(items.menu.clone()))
         .with_menu_on_left_click(false)
         .with_tooltip("Nebula Client")
         .with_icon(icon(look))
         .build()
-        .expect("значок в трее");
+        .expect("tray icon");
 
     let (tx, rx) = mpsc::channel::<Result<Status, ()>>();
-    let mut last: Option<Status> = None;
-    let mut svc_err: bool;
+    let mut last: Option<Status>;
     let mut next_poll = Instant::now();
     let mut polling = false;
 
@@ -91,20 +139,31 @@ pub fn run() {
         while let Ok(r) = rx.try_recv() {
             polling = false;
             next_poll = Instant::now() + Duration::from_secs(3);
-            svc_err = r.is_err();
+            let svc_err = r.is_err();
             last = r.ok();
-            let new_look = if svc_err { Look::Error } else { Look::of(last.as_ref().filter(|s| s.enrolled).map(|s| s.state)) };
+            let slugs: Vec<String> = last.as_ref().map(|s| s.networks.iter().map(|n| n.slug.clone()).collect()).unwrap_or_default();
+            if slugs != items.slugs {
+                // набор сетей поменялся: меню собирается заново
+                items = build(&last);
+                tray.set_menu(Some(Box::new(items.menu.clone())));
+            }
+            if let Some(s) = &last {
+                for (_, slug, item) in &items.nets {
+                    if let Some(n) = s.net(slug) {
+                        item.set_checked(n.want_up);
+                    }
+                }
+            }
+            let new_look = aggregate(&last, svc_err);
             if new_look != look {
                 look = new_look;
                 let _ = tray.set_icon(Some(icon(look)));
             }
             let text = describe(&last, svc_err);
-            let _ = tray.set_tooltip(Some(format!("Nebula Client\n{text}")));
-            status_item.set_text(text);
-            let enrolled = last.as_ref().map(|s| s.enrolled).unwrap_or(false);
-            let up = last.as_ref().map(|s| s.want_up).unwrap_or(false);
-            toggle_item.set_enabled(enrolled);
-            toggle_item.set_text(if up { "Отключиться" } else { "Подключиться" });
+            // подсказка значка в Windows обрезается после 127 символов
+            let tip: String = format!("Nebula Client\n{text}").chars().take(127).collect();
+            let _ = tray.set_tooltip(Some(tip));
+            status_text(&items.status, &text);
         }
 
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
@@ -113,20 +172,29 @@ pub fn run() {
             }
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            if ev.id == open_item.id() {
+            if ev.id == items.open.id() {
                 sys::open_window();
-            } else if ev.id == toggle_item.id() {
-                let up = last.as_ref().map(|s| s.want_up).unwrap_or(false);
-                std::thread::spawn(move || {
-                    let _ = common::call(if up { &Request::Disconnect } else { &Request::Connect });
-                });
-                next_poll = Instant::now() + Duration::from_millis(300);
-            } else if ev.id == auto_item.id() {
-                sys::set_autostart(auto_item.is_checked());
-            } else if ev.id == quit_item.id() {
+            } else if ev.id == items.auto.id() {
+                sys::set_autostart(items.auto.is_checked());
+            } else if ev.id == items.quit.id() {
                 // служба продолжает работать, закрывается только значок
                 return;
+            } else if let Some((_, slug, item)) = items.nets.iter().find(|(id, _, _)| *id == ev.id) {
+                // галочка уже переключилась сама: её новое значение и есть желаемое
+                let net = slug.clone();
+                let req = if item.is_checked() { Request::Connect { net } } else { Request::Disconnect { net } };
+                std::thread::spawn(move || {
+                    let _ = common::call(&req);
+                });
+                next_poll = Instant::now() + Duration::from_millis(300);
             }
         }
     }
+}
+
+/// Первая строка статуса в меню (весь список сетей виден ниже галочками).
+fn status_text(item: &MenuItem, text: &str) {
+    let first = text.lines().next().unwrap_or("Nebula Client");
+    let n = text.lines().count();
+    item.set_text(if n > 1 { trf!("{} (+{})", "{} (+{})", first, n - 1) } else { first.to_string() });
 }

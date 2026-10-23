@@ -1,6 +1,6 @@
 [package]
 name = "nebula-client-service"
-description = "Служба Nebula Client: вход в сеть, синхронизация и запуск Nebula"
+description = "Служба Nebula Client: вход в сети, синхронизация и запуск Nebula"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,9 +13,16 @@ path = "src/main.rs"
 common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# TLS на rustls с системными корневыми сертификатами: одинаково в Windows и Linux
+ureq = { version = "2", default-features = false, features = ["json", "tls", "native-certs"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 windows-service = "0.8"
-ureq = { version = "2", default-features = false, features = ["json", "native-tls"] }
-native-tls = "0.2"
-sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+flate2 = "1"
+tar = "0.4"

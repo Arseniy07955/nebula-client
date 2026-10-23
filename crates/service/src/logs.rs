@@ -24,7 +24,7 @@ impl Logs {
 
     /// Сообщение самой службы, с отметкой времени как у Nebula.
     pub fn note(&self, msg: impl AsRef<str>) {
-        self.push(format!("{} [служба] {}", stamp(), msg.as_ref()));
+        self.push(format!("{} {}", stamp(), msg.as_ref()));
     }
 
     pub fn tail(&self, n: usize) -> Vec<String> {
@@ -32,10 +32,11 @@ impl Logs {
         q.iter().skip(q.len().saturating_sub(n)).cloned().collect()
     }
 
-    /// Последняя строка Nebula с уровнем error/fatal: чтобы показать причину падения.
-    pub fn last_error(&self) -> Option<String> {
+    /// Последняя строка nebula этой сети с уровнем error/fatal: чтобы показать причину падения.
+    pub fn last_error(&self, tag: &str) -> Option<String> {
         let q = self.0.lock().unwrap();
-        q.iter().rev().take(50).find(|l| l.contains("level=error") || l.contains("level=fatal")).map(|l| {
+        let prefix = format!("[{tag}] ");
+        q.iter().rev().take(100).filter(|l| l.starts_with(&prefix)).find(|l| l.contains("level=error") || l.contains("level=fatal")).map(|l| {
             match (field(l, "msg"), field(l, "error")) {
                 (Some(m), Some(e)) => format!("{m}: {e}"),
                 (Some(m), None) => m,
