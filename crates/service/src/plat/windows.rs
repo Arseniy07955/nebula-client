@@ -236,7 +236,7 @@ pub struct DnsRule {
     /// NRPT адаптер не нужен, он для Linux
     #[allow(dead_code)]
     pub tun: String,
-    pub server: String,
+    pub servers: Vec<String>,
     pub domains: Vec<String>,
 }
 
@@ -244,35 +244,67 @@ const NRPT: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\
 /// Начало имени наших правил NRPT ("nebulaClie" в hex), по нему находим и чистим свои.
 const NRPT_OURS: &str = "{6E656275-6C61-436C-6965-";
 
-fn nrpt_key(slug: &str) -> String {
-    // FNV-1a: у каждой сети своё постоянное имя ключа
-    let h = slug.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+fn nrpt_key(zone: &str) -> String {
+    // FNV-1a: у каждой зоны своё постоянное имя ключа
+    let h = zone.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
     format!(r"{NRPT}\{NRPT_OURS}{:012X}}}", h & 0xFFFF_FFFF_FFFF)
 }
 
+/// Одна зона из нескольких сетей (neb и в main, и в friends) становится одним правилом:
+/// два правила на одно имя Windows не складывает, а берёт любое. Адреса внутри туннелей идут
+/// первыми, публичные после них, как запасные.
+fn merge_zones(rules: &[DnsRule]) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>, Vec<String>)> = vec![];
+    for r in rules {
+        for z in &r.domains {
+            let i = match out.iter().position(|(zone, _, _)| zone == z) {
+                Some(i) => i,
+                None => {
+                    out.push((z.clone(), vec![], vec![]));
+                    out.len() - 1
+                }
+            };
+            let (_, servers, slugs) = &mut out[i];
+            for s in &r.servers {
+                if !servers.contains(s) {
+                    servers.push(s.clone());
+                }
+            }
+            slugs.push(r.slug.clone());
+        }
+    }
+    let private = |s: &String| s.parse::<std::net::Ipv4Addr>().map(|ip| ip.is_private()).unwrap_or(false);
+    for (_, servers, _) in out.iter_mut() {
+        servers.sort_by_key(|s| !private(s));
+    }
+    out
+}
+
 /// Правила NRPT: Windows отправляет запросы к зонам сети на её DNS, остальные как обычно.
-/// Так же делают VPN-клиенты; правила видны в Get-DnsClientNrptPolicy.
+/// Так же делают VPN-клиенты; правила видны в Get-DnsClientNrptPolicy. Если первый сервер
+/// не ответил, Windows спрашивает следующий.
 pub fn set_dns(rules: &[DnsRule]) -> Result<(), String> {
     let (_, list) = run("reg.exe", &["query", NRPT]);
     for line in list.lines().map(str::trim).filter(|l| l.contains(NRPT_OURS)) {
         run("reg.exe", &["delete", line, "/f"]);
     }
     let mut errs = vec![];
-    for r in rules {
-        let key = nrpt_key(&r.slug);
-        let names: Vec<String> = r.domains.iter().map(|d| format!(".{d}")).collect();
-        let comment = format!("Nebula Client: {}", r.slug);
+    for (zone, servers, slugs) in merge_zones(rules) {
+        let key = nrpt_key(&zone);
+        let name = format!(".{zone}");
+        let servers = servers.join(";");
+        let comment = format!("Nebula Client: {}", slugs.join(", "));
         for (name, ty, val) in [
             ("Version", "REG_DWORD", "2"),
             ("ConfigOptions", "REG_DWORD", "8"),
-            ("Name", "REG_MULTI_SZ", &names.join(r"\0")),
-            ("GenericDNSServers", "REG_SZ", &r.server),
+            ("Name", "REG_MULTI_SZ", name.as_str()),
+            ("GenericDNSServers", "REG_SZ", &servers),
             ("IPSECCARestriction", "REG_SZ", ""),
             ("Comment", "REG_SZ", &comment),
         ] {
             let (ok, out) = run("reg.exe", &["add", &key, "/v", name, "/t", ty, "/d", val, "/f"]);
             if !ok {
-                errs.push(format!("{}: {}", r.slug, out.trim()));
+                errs.push(format!("{zone}: {}", out.trim()));
                 break;
             }
         }
@@ -401,6 +433,10 @@ mod tests {
         assert!(k.starts_with(r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{6E656275-6C61-436C-6965-"));
         assert_eq!(k.rsplit('\\').next().unwrap().len(), 38);
         assert_ne!(k, super::nrpt_key("friends"));
+        let r = |slug: &str, servers: &[&str]| super::DnsRule { slug: slug.into(), tun: String::new(), servers: servers.iter().map(|s| s.to_string()).collect(), domains: vec!["neb".into()] };
+        let m = super::merge_zones(&[r("friends", &["217.60.10.228", "217.60.10.83"]), r("main", &["10.0.10.7", "217.60.10.228"])]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].1, ["10.0.10.7", "217.60.10.228", "217.60.10.83"]);
         assert!(common::valid_zone("neb") && common::valid_zone("home.lan"));
         assert!(!common::valid_zone("neb\"; x") && !common::valid_zone(".neb") && !common::valid_zone("-a.neb"));
     }

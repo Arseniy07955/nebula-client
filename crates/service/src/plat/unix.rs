@@ -138,7 +138,7 @@ pub const OS: &str = "linux";
 pub struct DnsRule {
     pub slug: String,
     pub tun: String,
-    pub server: String,
+    pub servers: Vec<String>,
     pub domains: Vec<String>,
 }
 
@@ -154,7 +154,7 @@ pub fn set_dns(rules: &[DnsRule]) -> Result<(), String> {
     for r in rules {
         let routes: Vec<String> = r.domains.iter().map(|d| format!("~{d}")).collect();
         let steps: [Vec<&str>; 3] = [
-            vec!["dns", &r.tun, &r.server],
+            [vec!["dns", r.tun.as_str()], r.servers.iter().map(String::as_str).collect()].concat(),
             [vec!["domain", r.tun.as_str()], routes.iter().map(String::as_str).collect()].concat(),
             vec!["default-route", &r.tun, "false"],
         ];

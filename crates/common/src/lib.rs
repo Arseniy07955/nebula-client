@@ -160,8 +160,18 @@ pub struct NetStatus {
 /// DNS-сервер внутри сети и зоны, которые он обслуживает (например, neb для site.neb).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NetDns {
+    /// Основной сервер; его же понимают клиенты 0.5.0.
     pub server: String,
+    /// Все серверы по порядку: основной и запасные (с 0.5.1).
+    #[serde(default)]
+    pub servers: Vec<String>,
     pub domains: Vec<String>,
+}
+
+impl NetDns {
+    pub fn all(&self) -> Vec<String> {
+        if self.servers.is_empty() { vec![self.server.clone()] } else { self.servers.clone() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

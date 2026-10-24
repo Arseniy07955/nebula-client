@@ -237,7 +237,7 @@ fn client(cmd: &str, args: &[String]) -> i32 {
                         );
                         if let Some(d) = &n.dns {
                             let zones = d.domains.iter().map(|z| format!("*.{z}")).collect::<Vec<_>>().join(", ");
-                            println!("{:<12} DNS {} -> {}{}", "", zones, d.server, if n.dns_on { "" } else { tr(" (выключен)", " (off)") });
+                            println!("{:<12} DNS {} -> {}{}", "", zones, d.all().join(", "), if n.dns_on { "" } else { tr(" (выключен)", " (off)") });
                         }
                     }
                     if let Some(b) = st.busy {

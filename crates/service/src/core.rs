@@ -467,7 +467,7 @@ impl Core {
         n.set.last_sync = Some(now());
         if n.set.dns != p.dns {
             self.logs.note(format!("[{slug}] {}", match &p.dns {
-                Some(d) => trf!("DNS сети: {} для {}", "network DNS: {} for {}", d.server, d.domains.join(", ")),
+                Some(d) => trf!("DNS сети: {} для {}", "network DNS: {} for {}", d.all().join(", "), d.domains.join(", ")),
                 None => tr("панель убрала DNS сети", "the panel removed the network DNS").to_string(),
             }));
             n.set.dns = p.dns.clone();
@@ -624,8 +624,9 @@ impl Core {
                 .filter(|(_, n)| n.state == ConnState::Running && n.set.dns_on)
                 .filter_map(|(slug, n)| {
                     let d = n.set.dns.as_ref()?;
-                    let ok = d.server.parse::<std::net::Ipv4Addr>().is_ok() && !d.domains.is_empty() && d.domains.iter().all(|z| common::valid_zone(z));
-                    ok.then(|| plat::DnsRule { slug: slug.clone(), tun: n.tun.clone(), server: d.server.clone(), domains: d.domains.clone() })
+                    let servers = d.all();
+                    let ok = servers.iter().all(|s| s.parse::<std::net::Ipv4Addr>().is_ok()) && !d.domains.is_empty() && d.domains.iter().all(|z| common::valid_zone(z));
+                    ok.then(|| plat::DnsRule { slug: slug.clone(), tun: n.tun.clone(), servers, domains: d.domains.clone() })
                 })
                 .collect()
         };
@@ -637,7 +638,7 @@ impl Core {
             self.logs.note(trf!("DNS сети не настроен: {}", "network DNS not set up: {}", e));
         }
         for r in &rules {
-            self.logs.note(format!("[{}] {}", r.slug, trf!("имена {} спрашиваются у {}", "names in {} are resolved by {}", r.domains.iter().map(|d| format!("*.{d}")).collect::<Vec<_>>().join(", "), r.server)));
+            self.logs.note(format!("[{}] {}", r.slug, trf!("имена {} спрашиваются у {}", "names in {} are resolved by {}", r.domains.iter().map(|d| format!("*.{d}")).collect::<Vec<_>>().join(", "), r.servers.join(", "))));
         }
         self.inner.lock().unwrap().dns_sig = Some(sig);
     }

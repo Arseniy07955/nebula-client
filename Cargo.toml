@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/common", "crates/service", "crates/app"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/Arseniy07955/nebula-client"

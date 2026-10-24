@@ -451,7 +451,7 @@ impl App {
                         Some(d) => {
                             let zones = d.domains.iter().map(|z| format!("*.{z}")).collect::<Vec<_>>().join(", ");
                             let mut on = n.dns_on;
-                            if ui.add_enabled(!acting, egui::Checkbox::new(&mut on, format!("{}: {zones} → {}", n.title, d.server))).changed() {
+                            if ui.add_enabled(!acting, egui::Checkbox::new(&mut on, format!("{}: {zones} → {}", n.title, d.all().join(", ")))).changed() {
                                 self.act(ctx, Request::SetDns { net: n.slug.clone(), on }, "");
                             }
                         }
