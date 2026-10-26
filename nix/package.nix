@@ -1,5 +1,7 @@
 { lib
 , rustPlatform
+, rust-bin
+, makeRustPlatform
 , makeWrapper
 , libGL
 , libxkbcommon
@@ -8,10 +10,18 @@
 , nebulaServer ? "https://svyaz.msk1.catpaws.ru"
 }:
 
+
 let
   cargoToml = builtins.fromTOML (builtins.readFile ../Cargo.toml);
   # egui открывает эти библиотеки через dlopen, на NixOS их надо показать явно
   runtimeLibs = [ libGL libxkbcommon wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr ];
+
+  toolchain = rust-bin.stable."1.88.0".default;
+  rustPlatform = makeRustPlatform {
+    cargo = toolchain;
+    rustc = toolchain;
+  };
+
 in
 rustPlatform.buildRustPackage {
   pname = "nebula-client";
