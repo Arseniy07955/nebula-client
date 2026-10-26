@@ -16,7 +16,7 @@ let
   # egui открывает эти библиотеки через dlopen, на NixOS их надо показать явно
   runtimeLibs = [ libGL libxkbcommon wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr ];
 
-  toolchain = rust-bin.stable."1.88.0".default;
+  toolchain = rust-bin.stable."1.88.0".minimal;
   rustPlatform = makeRustPlatform {
     cargo = toolchain;
     rustc = toolchain;
