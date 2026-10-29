@@ -1,7 +1,7 @@
 {
   description = "Nebula Client: join Nebula overlay networks managed by nebula-panel";
 
-  inputs = { 
+  inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -24,9 +24,7 @@
     in
     {
       packages = forAll (pkgs: {
-        default = pkgs.callPackage ./nix/package.nix { 
-          rust-bin = pkgs.rust-bin;
-        };
+        default = pkgs.callPackage ./nix/package.nix { };
       });
 
       nixosModules.default = import ./nix/module.nix self;

@@ -1,5 +1,4 @@
 { lib
-, rustPlatform
 , rust-bin
 , makeRustPlatform
 , makeWrapper
@@ -9,7 +8,6 @@
 , xorg
 , nebulaServer ? "https://svyaz.msk1.catpaws.ru"
 }:
-
 
 let
   cargoToml = builtins.fromTOML (builtins.readFile ../Cargo.toml);
@@ -21,7 +19,6 @@ let
     cargo = toolchain;
     rustc = toolchain;
   };
-
 in
 rustPlatform.buildRustPackage {
   pname = "nebula-client";
