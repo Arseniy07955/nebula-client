@@ -82,6 +82,11 @@ class MainActivity : ComponentActivity() {
 fun App() {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     var device by remember { mutableStateOf(Store.load(ctx)) }
+    LaunchedEffect(Unit) {
+        // KEEP оставляет уже стоящую работу, так что повторные открытия окна ничего не сбрасывают
+        UpdateWorker.schedule(ctx)
+        if (device != null) SyncWorker.schedule(ctx)
+    }
     Box(Modifier.fillMaxSize().statusBarsPadding()) {
         val d = device
         if (d == null) {
@@ -167,6 +172,8 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
     var showLogs by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var syncing by remember { mutableStateOf(false) }
+    var showUpdates by remember { mutableStateOf(false) }
+    val upd by Updater.state.collectAsStateWithLifecycle()
 
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val vpnPerm = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
@@ -187,7 +194,12 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
 
     // служба могла жить без окна (после «Постоянной сети VPN»), поэтому сверяем статус с ядром
     LaunchedEffect(Unit) {
-        if (status is VpnStatus.Off && Nebulacore.running()) VpnState.set(VpnStatus.On)
+        if (status is VpnStatus.Off && Nebulacore.running()) {
+            VpnState.set(VpnStatus.On)
+        } else if (status is VpnStatus.Off && d.wantUp && VpnService.prepare(ctx) == null) {
+            // подключение было включено, но процесс умер (например, приложение обновилось): поднимаем снова
+            NebulaVpnService.connect(ctx)
+        }
     }
     LaunchedEffect(status) {
         while (true) {
@@ -272,6 +284,10 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
             OutlinedButton(onClick = { showLogs = true }) { Text(tr("Журнал", "Log")) }
             OutlinedButton(onClick = { confirmLeave = true }) { Text(tr("Выйти", "Leave")) }
         }
+        val avail = (upd as? UpdState.Available)?.release
+        OutlinedButton(onClick = { showUpdates = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (avail != null) tr("Обновления: доступна ${avail.version}", "Updates: ${avail.version} available") else tr("Обновления", "Updates"))
+        }
 
         Text(tr("Участники", "Members"), style = MaterialTheme.typography.titleMedium)
         LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -292,6 +308,7 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
         }
     }
 
+    if (showUpdates) UpdatesDialog(onClose = { showUpdates = false })
     if (showLogs) {
         AlertDialog(
             onDismissRequest = { showLogs = false },
@@ -329,4 +346,94 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
             dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text(tr("Отмена", "Cancel")) } },
         )
     }
+}
+
+@Composable
+fun UpdatesDialog(onClose: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val upd by Updater.state.collectAsStateWithLifecycle()
+    var mode by remember { mutableStateOf(Updater.mode(ctx)) }
+    var pre by remember { mutableStateOf(Updater.prerelease(ctx)) }
+    var canInstall by remember { mutableStateOf(Updater.canInstall(ctx)) }
+    val fmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+
+    // после возврата из окна разрешения «Неизвестные приложения» сверяем его заново
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) canInstall = Updater.canInstall(ctx)
+        }
+        val lc = (ctx as androidx.lifecycle.LifecycleOwner).lifecycle
+        lc.addObserver(obs)
+        onDispose { lc.removeObserver(obs) }
+    }
+
+    fun check() {
+        Updater.set(UpdState.Checking)
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { runCatching { Updater.check(ctx) } }
+            r.onSuccess { Updater.set(if (it != null) UpdState.Available(it) else UpdState.UpToDate) }
+                .onFailure { Updater.set(UpdState.Error(it.message ?: it.toString())) }
+        }
+    }
+
+    fun install(rel: Release) {
+        if (!Updater.canInstall(ctx)) {
+            ctx.startActivity(Updater.unknownSourcesIntent(ctx))
+            return
+        }
+        scope.launch { withContext(Dispatchers.IO) { Updater.downloadAndInstall(ctx, rel) } }
+    }
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { TextButton(onClick = onClose) { Text(tr("Закрыть", "Close")) } },
+        title = { Text(tr("Обновления", "Updates")) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(tr("Установлена версия ", "Installed version ") + Updater.installedVersion(ctx))
+                val last = Updater.lastCheck(ctx)
+                if (last > 0) Text(tr("Проверено: ", "Last check: ") + fmt.format(Date(last * 1000)), style = MaterialTheme.typography.bodySmall)
+                when (val u = upd) {
+                    is UpdState.Checking -> Text(tr("Проверяю…", "Checking…"))
+                    is UpdState.UpToDate -> Text(tr("У вас последняя версия", "You are up to date"))
+                    is UpdState.Available -> {
+                        Text(tr("Доступна версия ", "Version available: ") + u.release.version)
+                        Button(onClick = { install(u.release) }) { Text(tr("Обновить", "Update")) }
+                    }
+                    is UpdState.Downloading -> Text(tr("Скачиваю ${u.release.version}: ${u.percent}%", "Downloading ${u.release.version}: ${u.percent}%"))
+                    is UpdState.Installing -> Text(tr("Устанавливаю ${u.release.version}…", "Installing ${u.release.version}…"))
+                    is UpdState.Error -> Text(u.message, color = MaterialTheme.colorScheme.error)
+                    else -> {}
+                }
+                if (upd !is UpdState.Checking) OutlinedButton(onClick = { check() }) { Text(tr("Проверить сейчас", "Check now")) }
+
+                Text(tr("Как обновлять", "Update mode"), style = MaterialTheme.typography.titleSmall)
+                listOf(
+                    UpdateMode.AUTO to tr("Само", "Automatically"),
+                    UpdateMode.NOTIFY to tr("Только сообщать", "Notify only"),
+                    UpdateMode.OFF to tr("Не проверять", "Never check"),
+                ).forEach { (m, label) ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.RadioButton(selected = mode == m, onClick = { mode = m; Updater.setMode(ctx, m) })
+                        Text(label)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(checked = pre, onCheckedChange = { pre = it; Updater.setPrerelease(ctx, it) })
+                    Text(tr("Тестовые версии (pre-release)", "Test versions (pre-release)"))
+                }
+                if (!canInstall) {
+                    Text(
+                        tr(
+                            "Чтобы приложение ставило обновления, разрешите ему установку неизвестных приложений.",
+                            "To install updates the app needs the \"install unknown apps\" permission.",
+                        ),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    OutlinedButton(onClick = { ctx.startActivity(Updater.unknownSourcesIntent(ctx)) }) { Text(tr("Открыть настройки", "Open settings")) }
+                }
+            }
+        },
+    )
 }

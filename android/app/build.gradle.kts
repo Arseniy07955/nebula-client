@@ -20,8 +20,12 @@ android {
         applicationId = "ru.catpaws.nebulaclient"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.5.1-android1"
+        // версия и лента обновлений переопределяются для проверки: -PappVersionCode=... -PappVersionName=... -PupdateFeed=...
+        versionCode = (findProperty("appVersionCode") as String?)?.toInt() ?: 4
+        versionName = (findProperty("appVersionName") as String?) ?: "0.5.1-android4"
+        val feed = (findProperty("updateFeed") as String?) ?: "https://api.github.com/repos/Arseniy07955/nebula-client/releases?per_page=30"
+        buildConfigField("String", "UPDATE_FEED", "\"$feed\"")
+        manifestPlaceholders["cleartext"] = if (feed.startsWith("http://")) "true" else "false"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
@@ -49,7 +53,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     packaging { jniLibs.useLegacyPackaging = true }
 }
 
