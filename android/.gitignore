@@ -9,3 +9,4 @@ keystore/
 keystore.properties
 app/libs/*.aar
 app/libs/*.jar
+out/
