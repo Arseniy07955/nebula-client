@@ -134,15 +134,22 @@ class NebulaVpnService : VpnService() {
                 .setBlocking(false)
             // DNS сети (например, 10.0.10.7) отвечает и на *.neb, и на обычные имена. Android не умеет слать в VPN-DNS
             // только отдельные зоны, поэтому на время подключения он обслуживает все запросы. Сервер вне сети не берём: туда нет маршрута.
-            // Исключение: строгий «Частный DNS» (имя хоста). Android шлёт тогда все запросы по DoT на этот хост через VPN-сеть,
-            // а маршрута до него нет, и перестают резолвиться вообще все имена. В этом случае DNS сети не ставим.
+            // Строгий «Частный DNS» (имя хоста): Android шлёт тогда все запросы по DoT на этот хост через VPN-сеть, а маршрута
+            // до него нет, и перестают резолвиться вообще все имена. Поэтому в этом режиме DNS сети в VPN не ставим.
+            // Если этот хост и есть DNS сети (тот же сервер), он сам отвечает на *.neb, и ничего больше не нужно.
             val strict = if (d.dnsOn && d.dns.isNotEmpty()) strictPrivateDns() else null
+            val same = strict != null && privateDnsIsNetworkDns(strict, d.dns)
             VpnState.setNotice(
-                strict?.let {
-                    tr(
-                        "DNS сети не включён: в Android стоит «Частный DNS» $it, с ним имена .neb не резолвятся. " +
+                when {
+                    strict == null -> null
+                    same -> tr(
+                        "DNS сети обслуживает ваш «Частный DNS» $strict (тот же сервер), отдельный DNS в VPN не нужен.",
+                        "Your Private DNS $strict is the network DNS server itself, so no separate VPN DNS is needed.",
+                    )
+                    else -> tr(
+                        "DNS сети не включён: в Android стоит «Частный DNS» $strict, с ним имена .neb не резолвятся. " +
                             "Выберите «Автоматически» или «Отключено» в настройках сети и переподключитесь.",
-                        "Network DNS is off: Android Private DNS is set to $it, which breaks .neb names. " +
+                        "Network DNS is off: Android Private DNS is set to $strict, which breaks .neb names. " +
                             "Set Private DNS to Automatic or Off in the network settings and reconnect.",
                     )
                 },
@@ -180,6 +187,10 @@ class NebulaVpnService : VpnService() {
         }
         return null
     }
+
+    /** Резолвится ли хост «Частного DNS» в адрес одного из DNS-серверов сети (до подъёма VPN, по обычной сети). */
+    private fun privateDnsIsNetworkDns(host: String, netDns: List<String>): Boolean =
+        runCatching { java.net.InetAddress.getAllByName(host).any { it.hostAddress in netDns } }.getOrDefault(false)
 
     private fun inCidr(ip: String, net: String, len: Int): Boolean = runCatching {
         fun v(a: String) = a.split(".").fold(0L) { acc, x -> (acc shl 8) or x.toLong() }
