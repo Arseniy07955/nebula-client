@@ -160,6 +160,7 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val status by VpnState.status.collectAsStateWithLifecycle()
+    val notice by VpnState.notice.collectAsStateWithLifecycle()
     var peers by remember { mutableStateOf(d.peers) }
     var tunnels by remember { mutableStateOf(0L) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -225,6 +226,7 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
         }
         (status as? VpnStatus.Error)?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
         message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        notice?.let { Text(it, color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall) }
 
         val fmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
         Text(

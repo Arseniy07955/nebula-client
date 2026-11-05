@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -29,6 +31,13 @@ object VpnState {
     val status: StateFlow<VpnStatus> = _status
     fun set(s: VpnStatus) {
         _status.value = s
+    }
+
+    /** Предупреждение под переключателем (например, DNS сети не включён из-за «Частного DNS»). */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice
+    fun setNotice(s: String?) {
+        _notice.value = s
     }
 }
 
@@ -115,6 +124,7 @@ class NebulaVpnService : VpnService() {
             }
             val d = Store.load(this) ?: d0
             if (Nebulacore.running()) Nebulacore.stop()
+            refreshDns()
             val (net, len) = ConfigPrep.route(d.cidr)
             val b = Builder()
                 .setSession(getString(R.string.app_name))
@@ -124,7 +134,20 @@ class NebulaVpnService : VpnService() {
                 .setBlocking(false)
             // DNS сети (например, 10.0.10.7) отвечает и на *.neb, и на обычные имена. Android не умеет слать в VPN-DNS
             // только отдельные зоны, поэтому на время подключения он обслуживает все запросы. Сервер вне сети не берём: туда нет маршрута.
-            if (d.dnsOn) {
+            // Исключение: строгий «Частный DNS» (имя хоста). Android шлёт тогда все запросы по DoT на этот хост через VPN-сеть,
+            // а маршрута до него нет, и перестают резолвиться вообще все имена. В этом случае DNS сети не ставим.
+            val strict = if (d.dnsOn && d.dns.isNotEmpty()) strictPrivateDns() else null
+            VpnState.setNotice(
+                strict?.let {
+                    tr(
+                        "DNS сети не включён: в Android стоит «Частный DNS» $it, с ним имена .neb не резолвятся. " +
+                            "Выберите «Автоматически» или «Отключено» в настройках сети и переподключитесь.",
+                        "Network DNS is off: Android Private DNS is set to $it, which breaks .neb names. " +
+                            "Set Private DNS to Automatic or Off in the network settings and reconnect.",
+                    )
+                },
+            )
+            if (d.dnsOn && strict == null) {
                 d.dns.filter { inCidr(it, net, len) }.forEach { b.addDnsServer(it) }
             }
             val pfd = b.establish()
@@ -144,6 +167,20 @@ class NebulaVpnService : VpnService() {
         }
     }
 
+    /** Имя хоста строгого «Частного DNS» на обычной (не VPN) сети или null. */
+    private fun strictPrivateDns(): String? {
+        if (Build.VERSION.SDK_INT < 28) return null
+        val cm = getSystemService(ConnectivityManager::class.java)
+        for (n in cm.allNetworks) {
+            val c = cm.getNetworkCapabilities(n) ?: continue
+            if (c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            val lp = cm.getLinkProperties(n) ?: continue
+            val name = lp.privateDnsServerName
+            if (lp.isPrivateDnsActive && !name.isNullOrEmpty()) return name
+        }
+        return null
+    }
+
     private fun inCidr(ip: String, net: String, len: Int): Boolean = runCatching {
         fun v(a: String) = a.split(".").fold(0L) { acc, x -> (acc shl 8) or x.toLong() }
         val mask = if (len == 0) 0L else (0xFFFFFFFFL shl (32 - len)) and 0xFFFFFFFFL
@@ -155,6 +192,17 @@ class NebulaVpnService : VpnService() {
         unwatchNetwork()
         runCatching { Nebulacore.stop() }
         VpnState.set(VpnStatus.Off)
+        VpnState.setNotice(null)
+    }
+
+    /** DNS обычных сетей (не VPN): ядру нужны они, чтобы разрешать имена маяков. Пока VPN поднят, активная сеть уже наша, поэтому ищем среди всех. */
+    private fun refreshDns() {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val servers = cm.allNetworks.filter {
+            val c = cm.getNetworkCapabilities(it)
+            c != null && !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }.flatMap { cm.getLinkProperties(it)?.dnsServers.orEmpty() }.mapNotNull { it.hostAddress }.distinct()
+        Nebulacore.setDNS(servers.joinToString(","))
     }
 
     /** При смене сети (Wi-Fi <-> мобильная) сокет Nebula надо перевесить на новый интерфейс. */
@@ -164,6 +212,7 @@ class NebulaVpnService : VpnService() {
         var first = true
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                refreshDns()
                 if (first) {
                     first = false
                     return
@@ -172,7 +221,11 @@ class NebulaVpnService : VpnService() {
             }
         }
         netCb = cb
-        runCatching { cm.registerDefaultNetworkCallback(cb) }
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        runCatching { cm.registerNetworkCallback(req, cb) }
     }
 
     private fun unwatchNetwork() {

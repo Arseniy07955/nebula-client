@@ -3,11 +3,15 @@
 package nebulacore
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula"
@@ -26,6 +30,40 @@ var (
 	logbuf  = &ring{max: 64 * 1024}
 	logger  = newLogger()
 )
+
+// На Android нет /etc/resolv.conf, и встроенный в Go резолвер не находит ни одного сервера: имена маяков в
+// static_host_map не разрешаются, адресов нет и рукопожатия уходят в никуда. Серверы передаёт приложение
+// (DNS активной сети без VPN), к ним добавлены публичные на крайний случай.
+var (
+	dnsList atomic.Value // []string
+	dnsTurn atomic.Uint32
+)
+
+func init() {
+	dnsList.Store([]string{"1.1.1.1", "8.8.8.8"})
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			list := dnsList.Load().([]string)
+			// по кругу: Go повторяет запрос при таймауте и попадает на следующий сервер
+			i := int(dnsTurn.Add(1)-1) % len(list)
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, network, net.JoinHostPort(list[i], "53"))
+		},
+	}
+}
+
+// SetDNS: адреса DNS-серверов через запятую (IPv4 или IPv6), первые будут опрашиваться первыми.
+func SetDNS(csv string) {
+	var l []string
+	for _, p := range strings.Split(csv, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			l = append(l, p)
+		}
+	}
+	l = append(l, "1.1.1.1", "8.8.8.8")
+	dnsList.Store(l)
+}
 
 // ring хранит хвост журнала, чтобы показать его в приложении.
 type ring struct {
