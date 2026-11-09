@@ -31,13 +31,25 @@ object VpnState {
     val status: StateFlow<VpnStatus> = _status
     fun set(s: VpnStatus) {
         _status.value = s
+        tileCtx?.let { NebulaTileService.refresh(it) }
     }
+
+    /** Контекст приложения, чтобы обновлять плитку при каждой смене состояния. */
+    @Volatile
+    var tileCtx: android.content.Context? = null
 
     /** Предупреждение под переключателем (например, DNS сети не включён из-за «Частного DNS»). */
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice
     fun setNotice(s: String?) {
         _notice.value = s
+    }
+
+    /** Плитка просит подключиться, а разрешения VPN ещё нет: окно спросит его и подключится. */
+    private val _askConnect = MutableStateFlow(false)
+    val connectAsked: StateFlow<Boolean> = _askConnect
+    fun askConnect(v: Boolean) {
+        _askConnect.value = v
     }
 }
 
@@ -65,6 +77,11 @@ class NebulaVpnService : VpnService() {
     }
 
     private val worker = Executors.newSingleThreadExecutor()
+
+    override fun onCreate() {
+        super.onCreate()
+        VpnState.tileCtx = applicationContext
+    }
     private var netCb: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

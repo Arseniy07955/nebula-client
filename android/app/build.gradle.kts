@@ -21,8 +21,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // версия и лента обновлений переопределяются для проверки: -PappVersionCode=... -PappVersionName=... -PupdateFeed=...
-        versionCode = (findProperty("appVersionCode") as String?)?.toInt() ?: 4
-        versionName = (findProperty("appVersionName") as String?) ?: "0.5.1-android4"
+        versionCode = (findProperty("appVersionCode") as String?)?.toInt() ?: 5
+        versionName = (findProperty("appVersionName") as String?) ?: "0.5.2-android5"
         val feed = (findProperty("updateFeed") as String?) ?: "https://api.github.com/repos/Arseniy07955/nebula-client/releases?per_page=30"
         buildConfigField("String", "UPDATE_FEED", "\"$feed\"")
         manifestPlaceholders["cleartext"] = if (feed.startsWith("http://")) "true" else "false"

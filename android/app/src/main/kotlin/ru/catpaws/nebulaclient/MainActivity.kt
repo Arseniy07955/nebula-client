@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,7 +58,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -69,6 +73,7 @@ import java.util.Date
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        VpnState.tileCtx = applicationContext
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -168,6 +173,8 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
     val notice by VpnState.notice.collectAsStateWithLifecycle()
     var peers by remember { mutableStateOf(d.peers) }
     var tunnels by remember { mutableStateOf(0L) }
+    var rtt by remember { mutableStateOf<Map<String, Float?>>(emptyMap()) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     var message by remember { mutableStateOf<String?>(null) }
     var showLogs by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -192,6 +199,15 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
         if (intent != null) vpnPerm.launch(intent) else NebulaVpnService.connect(ctx)
     }
 
+    // плитка в шторке попросила подключиться, а разрешения VPN не было
+    val asked by VpnState.connectAsked.collectAsStateWithLifecycle()
+    LaunchedEffect(asked) {
+        if (asked) {
+            VpnState.askConnect(false)
+            if (status !is VpnStatus.On && status !is VpnStatus.Connecting) connect()
+        }
+    }
+
     // служба могла жить без окна (после «Постоянной сети VPN»), поэтому сверяем статус с ядром
     LaunchedEffect(Unit) {
         if (status is VpnStatus.Off && Nebulacore.running()) {
@@ -201,11 +217,26 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
             NebulaVpnService.connect(ctx)
         }
     }
+    // только пока окно на экране: в фоне ни панель, ни участников не дёргаем
     LaunchedEffect(status) {
-        while (true) {
-            if (status is VpnStatus.On) tunnels = Nebulacore.tunnels()
-            peers = withContext(Dispatchers.IO) { Repo.peers(ctx) }
-            delay(15_000)
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                if (status is VpnStatus.On) tunnels = Nebulacore.tunnels()
+                peers = withContext(Dispatchers.IO) { Repo.peers(ctx) }
+                delay(15_000)
+            }
+        }
+    }
+    LaunchedEffect(status, peers) {
+        if (status !is VpnStatus.On) {
+            rtt = emptyMap()
+            return@LaunchedEffect
+        }
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                rtt = Ping.all(peers.filter { it.online && it.ip != d.ip }.map { it.ip })
+                delay(5_000)
+            }
         }
     }
 
@@ -214,7 +245,10 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Spacer(Modifier.height(8.dp))
         Text(d.title, style = MaterialTheme.typography.headlineMedium)
-        Text("${d.name} · ${d.ip}", fontFamily = FontFamily.Monospace)
+        Text(
+            "${d.name} · ${d.ip}", fontFamily = FontFamily.Monospace,
+            modifier = Modifier.clickable { copyText(ctx, d.ip) },
+        )
 
         Card(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -289,10 +323,19 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
             Text(if (avail != null) tr("Обновления: доступна ${avail.version}", "Updates: ${avail.version} available") else tr("Обновления", "Updates"))
         }
 
-        Text(tr("Участники", "Members"), style = MaterialTheme.typography.titleMedium)
-        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(peers) { p ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+        val online = peers.count { it.online }
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(tr("Участники ", "Members ") + "$online/${peers.size}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            Text(tr("нажмите, чтобы скопировать IP", "tap to copy the IP"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        }
+        // вы, потом кто в сети, потом по имени; по пингу не сортируем, иначе строки прыгают
+        val sorted = remember(peers, d.ip) { peers.sortedWith(compareBy({ it.ip != d.ip }, { !it.online }, { it.name.lowercase() })) }
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            items(sorted, key = { it.ip }) { p ->
+                Row(
+                    Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable { copyText(ctx, p.ip) }.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Box(
                         Modifier.size(10.dp).clip(CircleShape)
                             .background(if (p.online) Color(0xFF2EAD4B) else Color(0xFF8A8A8A)),
@@ -302,7 +345,23 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
                         Text(p.name)
                         Text(p.ip, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                     }
-                    if (p.role.isNotEmpty() && p.role != "client") Text(p.role, style = MaterialTheme.typography.bodySmall)
+                    when {
+                        p.ip == d.ip -> Text(tr("это вы", "you"), style = MaterialTheme.typography.bodySmall)
+                        p.role == "lighthouse" -> Text(tr("маяк", "lighthouse"), style = MaterialTheme.typography.bodySmall)
+                        p.role.isNotEmpty() && p.role != "client" -> Text(p.role, style = MaterialTheme.typography.bodySmall)
+                    }
+                    rtt[p.ip]?.let { ms ->
+                        Spacer(Modifier.size(10.dp))
+                        Text(
+                            if (ms < 1f) tr("<1 мс", "<1 ms") else tr("${ms.toInt()} мс", "${ms.toInt()} ms"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when {
+                                ms < 60f -> Color(0xFF2EAD4B)
+                                ms < 150f -> Color(0xFFE5A50A)
+                                else -> Color(0xFFE04F4F)
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -345,6 +404,15 @@ fun MainScreen(d: Device, onChanged: () -> Unit, onLeft: () -> Unit) {
             },
             dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text(tr("Отмена", "Cancel")) } },
         )
+    }
+}
+
+/** Скопировать адрес. С Android 13 система сама показывает, что скопировано. */
+fun copyText(ctx: android.content.Context, text: String) {
+    val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("IP", text))
+    if (Build.VERSION.SDK_INT < 33) {
+        android.widget.Toast.makeText(ctx, tr("Скопировано: ", "Copied: ") + text, android.widget.Toast.LENGTH_SHORT).show()
     }
 }
 

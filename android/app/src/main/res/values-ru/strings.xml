@@ -3,4 +3,7 @@
     <string name="notif_channel">VPN</string>
     <string name="notif_text">Подключено к %1$s, %2$s</string>
     <string name="notif_disconnect">Отключить</string>
+    <string name="tile_label">Nebula</string>
+    <string name="tile_no_network">Нет сети</string>
+    <string name="tile_connecting">Подключаюсь…</string>
 </resources>
