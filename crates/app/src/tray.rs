@@ -66,6 +66,8 @@ struct Items {
     quit: MenuItem,
     /// (id пункта, slug сети)
     nets: Vec<(MenuId, String, CheckMenuItem)>,
+    /// «Скопировать IP»: (id пункта, адрес).
+    copy: Vec<(MenuId, String)>,
     /// «Обновить до X», если служба нашла новую версию.
     update: Option<MenuItem>,
     /// По этому ключу видно, что меню пора собрать заново.
@@ -74,7 +76,8 @@ struct Items {
 
 fn menu_key(st: &Option<Status>) -> String {
     let Some(s) = st else { return String::new() };
-    let nets: Vec<&str> = s.networks.iter().map(|n| n.slug.as_str()).collect();
+    // адрес в ключе: пункт «Скопировать IP» должен смениться вместе с ним; состояние подключения сюда не входит
+    let nets: Vec<String> = s.networks.iter().map(|n| format!("{}={}", n.slug, n.ip)).collect();
     format!("{}|{:?}|{}", nets.join(","), s.update.available, s.update.installing)
 }
 
@@ -102,8 +105,20 @@ fn build(st: &Option<Status>) -> Items {
         let _ = menu.append(&item);
         nets.push((item.id().clone(), n.slug.clone(), item));
     }
+    let mut copy = Vec::new();
+    for n in networks.iter().filter(|n| !n.ip.is_empty()) {
+        // адрес из сертификата, он тот же и при выключенной сети
+        let text = if networks.len() > 1 {
+            trf!("Скопировать IP {} ({})", "Copy IP {} ({})", n.ip, n.title)
+        } else {
+            trf!("Скопировать IP {}", "Copy IP {}", n.ip)
+        };
+        let item = MenuItem::new(text, true, None);
+        let _ = menu.append(&item);
+        copy.push((item.id().clone(), n.ip.clone()));
+    }
     let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &auto, &quit]);
-    Items { menu, status, open, auto, quit, nets, update, key: menu_key(st) }
+    Items { menu, status, open, auto, quit, nets, copy, update, key: menu_key(st) }
 }
 
 pub fn run() {
@@ -200,6 +215,8 @@ pub fn run() {
                 } else {
                     sys::open_window();
                 }
+            } else if let Some((_, ip)) = items.copy.iter().find(|(id, _)| *id == ev.id) {
+                sys::copy_text(ip);
             } else if ev.id == items.quit.id() {
                 // служба продолжает работать, закрывается только значок
                 return;
