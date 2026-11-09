@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/common", "crates/service", "crates/app"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/Arseniy07955/nebula-client"
@@ -18,7 +18,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_Memory",
     "Win32_System_Environment",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",

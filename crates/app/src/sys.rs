@@ -73,6 +73,37 @@ pub fn install_service() -> bool {
     r as isize > 32
 }
 
+/// Положить текст в буфер обмена (из трея: окна egui там нет).
+pub fn copy_text(text: &str) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let w = wide(text);
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let mem = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2);
+        let mut ok = false;
+        if !mem.is_null() {
+            let p = GlobalLock(mem) as *mut u16;
+            if !p.is_null() {
+                std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+                GlobalUnlock(mem);
+                // после успеха памятью владеет система
+                ok = !SetClipboardData(CF_UNICODETEXT, mem as HANDLE).is_null();
+            }
+            if !ok {
+                GlobalFree(mem);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
 pub fn open_window() {
     if focus_existing_window() {
         return;

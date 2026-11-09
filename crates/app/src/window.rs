@@ -52,6 +52,13 @@ struct App {
     /// Выбранная сеть со свободной регистрацией, если их несколько.
     pick: Option<String>,
     confirm_leave: Option<Instant>,
+    /// Поиск по участникам (имя или адрес).
+    peer_q: String,
+    hide_offline: bool,
+    /// Журнал: только ошибки, предупреждения и события службы.
+    logs_important: bool,
+    /// Когда журнал скопирован: показать «Скопировано» пару секунд.
+    logs_copied: Option<Instant>,
 }
 
 pub fn run() {
@@ -101,6 +108,10 @@ impl App {
             open_asked: None,
             pick: None,
             confirm_leave: None,
+            peer_q: String::new(),
+            hide_offline: false,
+            logs_important: false,
+            logs_copied: None,
         }
     }
 
@@ -597,19 +608,54 @@ impl App {
             });
         });
         ui.add_space(4.0);
+        let online = peers.iter().filter(|p| p.online).count();
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Peers, trf!("Участники ({})", "Members ({})", peers.len()));
+            ui.selectable_value(&mut self.tab, Tab::Peers, trf!("Участники ({}/{})", "Members ({}/{})", online, peers.len()))
+                .on_hover_text(tr("В сети / всего", "Online / total"));
             ui.selectable_value(&mut self.tab, Tab::Logs, tr("Журнал", "Log"));
         });
         ui.separator();
+        // строка поиска или кнопок журнала идёт до расчёта высоты списка, иначе он налезет на кнопки снизу
+        match self.tab {
+            Tab::Peers => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.peer_q).hint_text(tr("Поиск по имени или адресу", "Search by name or address")).desired_width(ui.available_width() - 150.0));
+                    ui.checkbox(&mut self.hide_offline, tr("Скрыть офлайн", "Hide offline"));
+                });
+            }
+            Tab::Logs => {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.logs_important, tr("Только важное", "Important only"))
+                        .on_hover_text(tr("Ошибки и предупреждения Nebula и события службы", "Nebula errors and warnings, and service events"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let copied = self.logs_copied.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+                        if ui.button(if copied { tr("Скопировано", "Copied") } else { tr("Скопировать", "Copy") }).clicked() {
+                            let text = logs.iter().filter(|l| !self.logs_important || important(l)).cloned().collect::<Vec<_>>().join("\n");
+                            ui.output_mut(|o| o.copied_text = text);
+                            self.logs_copied = Some(Instant::now());
+                        }
+                    });
+                });
+            }
+        }
         let h = (ui.available_height() - 64.0).max(80.0);
         match self.tab {
             Tab::Peers => {
+                let q = self.peer_q.trim().to_lowercase();
+                let mut shown: Vec<&Peer> = peers
+                    .iter()
+                    .filter(|p| !self.hide_offline || p.online || p.ip == n.ip)
+                    .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q) || p.ip.contains(&q))
+                    .collect();
+                // вы, потом кто в сети, потом по имени; по пингу не сортируем, иначе строки прыгают каждые 5 с
+                shown.sort_by_key(|p| (p.ip != n.ip, !p.online, p.name.to_lowercase()));
                 egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| {
                     if peers.is_empty() {
                         ui.label(RichText::new(tr("Пока никого", "Nobody yet")).color(MUTED));
+                    } else if shown.is_empty() {
+                        ui.label(RichText::new(tr("Никого не нашлось", "No matches")).color(MUTED));
                     }
-                    for p in peers {
+                    for p in shown {
                         ui.horizontal(|ui| {
                             dot(ui, if p.online { ACCENT } else { Color32::from_gray(90) }, 4.0);
                             ui.label(RichText::new(&p.name).strong());
@@ -645,8 +691,15 @@ impl App {
             }
             Tab::Logs => {
                 egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                    for l in logs {
-                        ui.label(RichText::new(l).monospace().size(11.0));
+                    for l in logs.iter().filter(|l| !self.logs_important || important(l)) {
+                        let color = if l.contains("level=error") || l.contains("level=fatal") {
+                            DANGER
+                        } else if l.contains("level=warn") {
+                            Color32::from_rgb(0xe5, 0xa5, 0x0a)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(RichText::new(l).monospace().size(11.0).color(color));
                     }
                 });
             }
@@ -675,6 +728,12 @@ impl App {
             });
         });
     }
+}
+
+/// Строка журнала для фильтра «Только важное»: у Nebula уровень warning и выше, у службы все её события
+/// (в них нет `level=`, и их немного: подключение, синхронизация, ошибки).
+fn important(l: &str) -> bool {
+    !l.contains("level=") || ["level=warn", "level=error", "level=fatal", "level=panic"].iter().any(|k| l.contains(k))
 }
 
 /// Открыть ссылку в браузере без окна консоли.
